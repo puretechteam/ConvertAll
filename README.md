@@ -2,6 +2,14 @@
 
 Convert, compress or extract any file. Drop it in, pick a format, done.
 
+## Just want the app?
+
+Download the repo (**Code → Download ZIP**), unzip it, and run **`app\ConvertAll.exe`**. Nothing to install.
+
+The `app` folder is all you need. You can delete everything else (the source code, tests and packaging files are only for developers) and move `app` wherever you like. Keep `ConvertAll.exe` and its `_internal` folder together: the exe won't start without it.
+
+## Using it
+
 - **Window:** `ConvertAll.exe`. Drop files or folders on it, choose a format (the most common conversion for that file is already picked, and next time it remembers yours), click **Convert**. Archives also get **Extract here**. Output lands next to the original and never overwrites (`photo (1).png`).
 - **Terminal:** `convertall-cli.exe` (or `convertall` when installed with pip).
 - **Right-click:** in the window, go to ⋯ → *Add to right-click menu* to get "Convert with ConvertAll" in Explorer (Windows 11: under *Show more options*).
@@ -61,7 +69,7 @@ python -m venv .venv
 .venv\Scripts\python -m convertall              # window
 .venv\Scripts\python -m pytest                  # tests (engine tests skip if the engine is missing)
 .venv\Scripts\python -m pytest tests\test_e2e.py --e2e   # every format -> every target it can reach (slow)
-.venv\Scripts\pyinstaller --noconfirm ConvertAll.spec   # -> dist\ConvertAll\
+.venv\Scripts\pyinstaller --noconfirm ConvertAll.spec   # -> dist\ConvertAll\ (copy it over app\ to update the shipped app)
 python packaging\make_icon.py                   # regenerate the icon
 ```
 
