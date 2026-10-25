@@ -19,7 +19,7 @@ DATAS += collect_data_files("pydicom", excludes=["**/test_files/**", "**/charset
 GMSH_DLL = glob.glob(os.path.join(os.path.dirname(sysconfig.get_paths()["purelib"]), "gmsh-*.dll"))
 BINARIES = [(dll, ".") for dll in GMSH_DLL]
 
-MODULES = collect_submodules("convertall") + ["pydicom.pixels.decoders", "jpeg_ls"]
+MODULES = collect_submodules("convertall") + collect_submodules("meshport") + ["pydicom.pixels.decoders", "jpeg_ls"]
 # PyMuPDF 2 bundles an optional AI layout analyzer (onnxruntime + model files); ConvertAll doesn't
 # use it and PyMuPDF imports it inside try/except ImportError.
 EXCLUDES = ["tkinter", "unittest", "pydoc_data", "test", "pymupdf.layout", "pymupdf4llm",

@@ -424,6 +424,10 @@ class Samples:
                 out = (scene if fmt in ("glb", "3mf", "obj", "ply", "stl") else scene.to_mesh()).export(file_type=fmt)
                 p.write_bytes(out.encode() if isinstance(out, str) else out)
             return p
+        if fmt == "fbx" and not engines.find("blender"):  # Blender's FBX is the more independent sample
+            import meshport
+            meshport.save(meshport.load(self("glb")), p)
+            return p
         if fmt in ("fbx", "blend", "usd", "usdz", "abc"):
             return _blender(self("glb"), p)
         if fmt in ("step", "iges", "brep"):

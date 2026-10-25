@@ -30,8 +30,8 @@ The `app` folder is all you need. You can delete everything else (the source cod
 | Markdown & HTML | md → html, html → md, docx → html/md (md ↔ docx chains through html) | built in (+ LibreOffice for → docx) |
 | Comics | cbz cbr cb7 cbt → pdf (pages kept as they are, in reading order), between each other, and pdf → cbz/cb7/cbt; a folder of images → pdf or cbz. Renamed comics (a "cbr" that's really a zip) are detected by content | built in (7-Zip for real RAR comics) |
 | Ebooks | epub mobi azw3 azw fb2 lit pdb lrf, and html/docx/odt/rtf/txt → epub/mobi/azw3; comics → epub/mobi/azw3 | Calibre (epub/mobi/fb2 → pdf is built in) |
-| 3D models | stl obj ply off glb gltf 3mf dae, all to each other (parts, colors and textures kept where the format can hold them) | built in |
-| 3D (DCC) | fbx blend usd usdz abc ↔ the mesh formats above | Blender |
+| 3D models | stl obj ply off glb gltf 3mf dae fbx, all to each other (parts, colors and textures kept where the format can hold them). FBX: binary and ASCII, 2006 onward; textures are found even when the file points at another PC | built in ([meshport](https://github.com/puretechteam/meshport) for FBX) |
+| 3D (DCC) | blend usd usdz abc ↔ the formats above | Blender |
 | CAD | step/stp, iges/igs, brep → watertight stl (and from there any mesh format); dxf → svg/pdf/png | built in |
 | Medical | DICOM (.dcm or no extension) → png/jpg/tiff/… with the scanner's display window applied; multi-frame → folder, gif or multi-page tiff/pdf; header → json | built in |
 | Data | json jsonl yaml toml xml ini plist csv tsv xlsx, all to each other; sqlite databases → any of them | built in |

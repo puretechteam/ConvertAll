@@ -1,4 +1,4 @@
-"""3D models: mesh formats via trimesh (built in); FBX/Blend/USD/Alembic via Blender."""
+"""3D models: mesh formats via trimesh, FBX via meshport (both built in); Blend/USD/Alembic via Blender."""
 
 from pathlib import Path
 
@@ -56,21 +56,33 @@ def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     return dst
 
 
+# ---- FBX via meshport (pure Python): FBX <-> glTF, and on to everything else through GLB
+
+@converter(inputs={"fbx"}, outputs={"glb", "gltf"})
+@converter(inputs={"glb", "gltf"}, outputs={"fbx"})
+def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
+    import meshport
+    try:
+        meshport.save(meshport.load(src, src_fmt), dst, dst_fmt)
+    except meshport.MeshportError as e:
+        raise ConversionError(str(e)) from None
+    return dst
+
+
 # ---- Blender, for formats nothing lightweight reads or writes reliably
 
-BLENDER_IN = {"fbx", "blend", "usd", "usdz", "abc"}
+BLENDER_IN = {"blend", "usd", "usdz", "abc"}
 
 _BLENDER_SCRIPT = r'''
 import bpy, sys
 src, dst, sf, df = sys.argv[sys.argv.index("--") + 1:]
 ops = bpy.ops
 IMPORT = {
-    "fbx": ops.import_scene.fbx, "glb": ops.import_scene.gltf, "gltf": ops.import_scene.gltf,
+    "glb": ops.import_scene.gltf, "gltf": ops.import_scene.gltf,
     "obj": ops.wm.obj_import, "stl": ops.wm.stl_import, "ply": ops.wm.ply_import,
     "usd": ops.wm.usd_import, "usdz": ops.wm.usd_import, "abc": ops.wm.alembic_import,
 }
 EXPORT = {
-    "fbx": lambda p: ops.export_scene.fbx(filepath=p, path_mode="COPY", embed_textures=True),
     "glb": lambda p: ops.export_scene.gltf(filepath=p, export_format="GLB"),
     "obj": lambda p: ops.wm.obj_export(filepath=p),
     "stl": lambda p: ops.wm.stl_export(filepath=p),
@@ -90,13 +102,13 @@ EXPORT[df](dst)
 '''
 
 
-# GLB is the cheap hub: multi-hop routes (fbx -> glb -> 3mf) go through it and keep separate
+# GLB is the cheap hub: multi-hop routes (usdz -> glb -> 3mf) go through it and keep separate
 # parts, instead of through STL/PLY, which merge everything into one mesh. OBJ and USD may come
 # out as folders (textures as side files), so they can only be the last step.
 @converter(inputs=BLENDER_IN, outputs={"glb"}, engine="blender")
-@converter(inputs=BLENDER_IN, outputs={"fbx", "stl", "ply", "usdz", "abc"}, engine="blender", cost=2)
+@converter(inputs=BLENDER_IN, outputs={"stl", "ply", "usdz", "abc"}, engine="blender", cost=2)
 @converter(inputs=BLENDER_IN, outputs={"obj", "usd"}, engine="blender", cost=2, terminal=True)
-@converter(inputs={"glb", "gltf", "obj", "stl", "ply"}, outputs={"fbx", "usdz", "abc"}, engine="blender")
+@converter(inputs={"glb", "gltf", "obj", "stl", "ply"}, outputs={"usdz", "abc"}, engine="blender")
 @converter(inputs={"glb", "gltf", "obj", "stl", "ply"}, outputs={"usd"}, engine="blender", terminal=True)
 def blender_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     exe = engines.require("blender")

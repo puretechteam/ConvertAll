@@ -147,11 +147,44 @@ def test_dicom_unsupported_compression_is_clear(tmp_path):
         convert(_sample("JPEG-LL.dcm", tmp_path), "png")
 
 
+# ---- FBX (meshport, built in)
+
+def test_fbx_roundtrip_keeps_parts_and_texture(glb, tmp_path):
+    fbx = convert(glb, "fbx")
+    assert fbx.read_bytes().startswith(b"Kaydara FBX Binary")
+    back = convert(fbx, "glb", out_dir=tmp_path / "back")
+    assert _scene_stats(back) == (2, 332)
+    scene = trimesh.load_scene(str(back))
+    assert any(getattr(g.visual, "material", None) is not None and g.visual.material.baseColorTexture is not None
+               for g in scene.geometry.values())
+
+
+@pytest.mark.parametrize("fmt", ["3mf", "stl", "obj"])
+def test_fbx_chains_through_glb(glb, tmp_path, fmt):
+    fbx = convert(glb, "fbx", out_dir=tmp_path / "fbx")
+    assert _scene_stats(convert(fbx, fmt, out_dir=tmp_path / fmt))[1] == 332
+
+
+def test_stl_to_fbx(glb, tmp_path):
+    stl = convert(glb, "stl", out_dir=tmp_path / "stl")
+    fbx = convert(stl, "fbx", out_dir=tmp_path / "fbx")
+    assert _scene_stats(convert(fbx, "glb", out_dir=tmp_path / "glb"))[1] == 332
+
+
+def test_fbx_without_geometry_is_a_clear_error(tmp_path):
+    import meshport
+    from meshport.fbxtree import write_binary
+    records = meshport.fbx._Writer(meshport.Scene()).records()  # header, settings, no objects
+    (tmp_path / "anim.fbx").write_bytes(write_binary(records))
+    with pytest.raises(ConversionError, match="No 3D geometry"):
+        convert(tmp_path / "anim.fbx", "glb")
+
+
 # ---- Blender (skipped when not installed)
 
 @needs("blender")
 def test_blender_roundtrips(glb, tmp_path):
-    for fmt in ("fbx", "usdz", "abc"):
+    for fmt in ("usdz", "abc"):
         out = convert(glb, fmt)
         back = convert(out, "glb", out_dir=tmp_path / fmt)
         assert _scene_stats(back)[1] == 332
