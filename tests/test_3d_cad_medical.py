@@ -43,6 +43,23 @@ def test_mesh_formats(glb, fmt, parts):
     assert _scene_stats(out) == (parts, 332)
 
 
+def _tallest_axis(path):
+    return int(np.argmax(trimesh.load_scene(str(path)).extents))
+
+
+def test_printing_formats_are_z_up(tmp_path):
+    tower = tmp_path / "tower.glb"
+    trimesh.Scene({"t": trimesh.creation.box((1, 5, 2))}).export(tower)  # tall in Y, deeper in Z
+    stl = convert(tower, "stl", out_dir=tmp_path / "stl")
+    assert _tallest_axis(stl) == 2  # stands upright in a slicer
+    bounds = trimesh.load_scene(str(stl)).bounds
+    np.testing.assert_allclose(bounds[1] - bounds[0], [1, 2, 5], atol=1e-6)  # front (+Z) became -Y, not mirrored
+    assert _tallest_axis(convert(stl, "3mf", out_dir=tmp_path / "3mf")) == 2  # Z-up to Z-up: untouched
+    assert _tallest_axis(convert(stl, "glb", out_dir=tmp_path / "back")) == 1  # and back to Y-up
+    fbx = convert(tower, "fbx", out_dir=tmp_path / "fbx")
+    assert _tallest_axis(convert(fbx, "stl", out_dir=tmp_path / "fbx_stl")) == 2
+
+
 def test_obj_with_texture_is_a_folder(glb):
     out = convert(glb, "obj")
     assert out.is_dir() and {p.suffix for p in out.iterdir()} >= {".obj", ".mtl", ".png"}

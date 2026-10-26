@@ -8,15 +8,23 @@ from ..registry import converter
 
 MESH = {"stl", "obj", "ply", "off", "glb", "gltf", "3mf", "dae"}
 SCENE_EXPORT = {"glb", "gltf", "3mf", "stl", "obj", "ply"}  # these keep (or merge) parts themselves
+# 3D-printing formats stand on a build plate: Z is up. Everything else here is glTF's Y-up,
+# so these are turned on the way in and out (and not at all between two of them).
+Z_UP = {"stl", "3mf"}
+_Y_UP_TO_Z_UP = [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]  # (x, y, z) -> (x, -z, y)
 
 
-def _load(src: Path):
+def _load(src: Path, src_fmt: str | None = None, dst_fmt: str | None = None):
+    import numpy as np
     import trimesh
     scene = trimesh.load_scene(str(src))
     if not scene.geometry:
         raise ConversionError("No 3D geometry found in this file")
     if not any(hasattr(g, "faces") and len(g.faces) for g in scene.geometry.values()):
         raise ConversionError("This file is a point cloud; only PLY can hold it")
+    if (src_fmt in Z_UP) != (dst_fmt in Z_UP):
+        turn = np.array(_Y_UP_TO_Z_UP, float)
+        scene.apply_transform(turn if dst_fmt in Z_UP else turn.T)
     return scene
 
 
@@ -60,7 +68,7 @@ def _geometry_only(scene):
 @converter(inputs=MESH, outputs={"obj"}, terminal=True)  # may be a folder; chain via GLB instead
 def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import trimesh
-    scene = _load(src)
+    scene = _load(src, src_fmt, dst_fmt)
     if dst_fmt == "gltf":  # one self-contained file instead of .gltf + .bin buffers
         files = trimesh.exchange.gltf.export_gltf(scene, embed_buffers=True)
         dst.write_bytes(next(v for k, v in files.items() if k.endswith(".gltf")))

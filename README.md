@@ -40,6 +40,8 @@ The `app` folder is all you need. You can delete everything else (the source cod
 
 When there's no direct conversion, ConvertAll chains steps automatically, for example docx → pdf → png, fbx → glb → 3mf, or step → stl → glb. If a step needs an engine that's missing, ConvertAll offers a one-time install with `winget`. Check engine status with ⋯ → *Engines…* or `convertall engines`.
 
+STL and 3MF are written Z-up (and read as Z-up), so models stand upright in 3D-printing slicers. The other 3D formats are Y-up.
+
 Some outputs come back as a **folder**: multi-page PDFs and multi-frame DICOMs saved as single-image formats, plus OBJ and USD models that have textures or materials (stored as side files).
 
 ConvertAll can read but not create RAR/CBR (no free RAR encoder exists); CBR → CBZ is the usual fix.
