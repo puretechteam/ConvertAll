@@ -2,6 +2,8 @@
 
 Convert, compress or extract any file. Drop it in, pick a format, done.
 
+What's new: see the [changelog](CHANGELOG.md).
+
 ## Just want the app?
 
 Download the repo (**Code → Download ZIP**), unzip it, and run **`app\ConvertAll.exe`**. Nothing to install.
