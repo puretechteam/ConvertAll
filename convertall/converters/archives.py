@@ -8,7 +8,6 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-import py7zr
 
 try:
     from compression import zstd  # Python 3.14+
@@ -36,6 +35,7 @@ COMIC_CONTAINER = {"cbz": "zip", "cbr": "rar", "cb7": "7z", "cbt": "tar"}
 
 def compress(src: Path, dst: Path, fmt: str) -> None:
     """Pack a file or folder (folder name kept as the top-level entry; comics keep pages at the top)."""
+    import py7zr
     arcname = src.name
     if fmt in COMICS:
         if fmt == "cbr":
@@ -88,6 +88,7 @@ def _sevenzip_extract(src: Path, dest: Path) -> None:
 
 
 def extract_to(src: Path, dest: Path, fmt: str) -> None:
+    import py7zr
     dest.mkdir(parents=True, exist_ok=True)
     fmt = COMIC_CONTAINER.get(fmt, fmt)
     if fmt in SEVENZIP_EXTRACT:

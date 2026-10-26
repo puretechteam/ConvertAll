@@ -1,24 +1,28 @@
 """Raster images via Pillow (+ pillow-heif for HEIC)."""
 
+import functools
+import importlib.util
 from pathlib import Path
 
 from PIL import Image, ImageOps, ImageSequence
 
 from ..registry import converter
 
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except ImportError:  # HEIC just won't be offered
-    pillow_heif = None
-
 PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP", "tiff": "TIFF",
     "ico": "ICO", "tga": "TGA", "avif": "AVIF", "ppm": "PPM", "jp2": "JPEG2000", "pcx": "PCX",
     "dds": "DDS", "qoi": "QOI", "icns": "ICNS", "pdf": "PDF", "sgi": "SGI", "xbm": "XBM",
 }
-if pillow_heif:
+if importlib.util.find_spec("pillow_heif"):  # without it, HEIC just isn't offered
     PIL_FORMAT["heic"] = "HEIF"
+
+
+@functools.cache
+def enable_heif() -> None:
+    """Teach Pillow HEIC on first use; importing pillow-heif up front would slow every run."""
+    if "heic" in PIL_FORMAT:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
 
 WRITE = set(PIL_FORMAT)
 READ = (WRITE - {"pdf"}) | {"psd", "cur", "xpm"}
@@ -57,6 +61,8 @@ def prepare(img: Image.Image, fmt: str) -> Image.Image:
 
 def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] | None = None,
                duration=None) -> None:
+    if fmt == "heic":
+        enable_heif()
     opts = dict(SAVE_OPTS.get(fmt, {}))
     if frames and len(frames) > 1 and fmt in ANIMATED:
         opts.update(save_all=True, append_images=frames[1:])
@@ -75,6 +81,8 @@ def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] 
 @converter(inputs=READ, outputs=WRITE - {"pdf"})
 @converter(inputs=READ, outputs={"pdf"}, terminal=True)  # an image PDF has no text to chain into docx etc.
 def pillow_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
+    if src_fmt == "heic":
+        enable_heif()
     with Image.open(src) as img:
         n = getattr(img, "n_frames", 1)
         if n > 1 and dst_fmt in ANIMATED:

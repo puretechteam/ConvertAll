@@ -11,9 +11,6 @@ import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import tomli_w
-import yaml
-
 from ..errors import ConversionError
 from ..registry import converter
 
@@ -85,6 +82,7 @@ def load(path: Path, fmt: str):
     if fmt == "sqlite":
         return _load_sqlite(path)
     if fmt == "yaml":
+        import yaml
         return yaml.safe_load(text())
     if fmt == "toml":
         return tomllib.loads(text())
@@ -221,11 +219,13 @@ def dump(data, path: Path, fmt: str) -> None:
         with path.open("wb") as f:
             plistlib.dump(_drop_none(json.loads(json.dumps(data, default=str))), f)
     elif fmt == "yaml":
+        import yaml
         path.write_text(yaml.safe_dump(json.loads(json.dumps(data, default=str)), sort_keys=False,
                                        allow_unicode=True), encoding="utf-8")
     elif fmt == "toml":
         if not isinstance(data, dict):
             data = {"items": data}
+        import tomli_w
         path.write_text(tomli_w.dumps(_drop_none(data)), encoding="utf-8")
     elif fmt == "xml":
         if isinstance(data, dict) and len(data) == 1:

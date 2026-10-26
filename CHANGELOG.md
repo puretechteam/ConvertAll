@@ -2,6 +2,20 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## 2026-10-25: Faster startup, sturdier 3D parsing
+
+- **Faster:** every conversion starts about a third quicker. Heavy libraries (the PDF engine, 7z, HEIC, fonts, YAML/TOML) now load only when a conversion needs them, not on every run.
+
+  | Conversion (app) | Before | After |
+  |---|---|---|
+  | JSON → YAML, tiny file | 0.40 s | 0.25 s |
+  | PNG → JPG | 0.37 s | 0.25 s |
+  | FBX → GLB, car model | 0.44 s | 0.31 s |
+
+  In a pip install, where newer PyMuPDF versions also load a layout model, loading the converters went from about 1.9 s to 0.1 s.
+- **Fixed:** damaged or deliberately malformed FBX and glTF files now always give a "this file is damaged" message instead of an internal error. A tiny file can no longer claim gigabytes of memory by inflating a compressed array. This is checked by fuzz tests in meshport.
+- **Checked:** no secrets or personal paths anywhere in the source, the git history or the shipped app.
+
 ## 2026-10-25: STL and 3MF stand upright
 
 - **Changed:** STL and 3MF are written Z-up, as 3D-printing slicers expect, and read as Z-up. Before, they came out Y-up like the other 3D formats, so a model could lie on its side in a slicer.

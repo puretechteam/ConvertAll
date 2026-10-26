@@ -4,14 +4,13 @@ import io
 import re
 from pathlib import Path
 
-import pymupdf
 from PIL import Image, ImageOps
 
 from ..detect import COMICS
 from ..errors import ConversionError
 from ..registry import converter
 from .archives import compress, extract_to
-from .images import READ as PIL_READ, prepare
+from .images import READ as PIL_READ, enable_heif, prepare
 from .pdf import PDF_DPI
 
 PAGE_EXT = {f".{e}" for e in PIL_READ} | {".jpeg", ".jpe", ".jfif", ".tif", ".heif"}
@@ -31,6 +30,8 @@ def _pages(root: Path) -> list[Path]:
 
 def _page_bytes(path: Path) -> tuple[bytes, tuple[int, int]]:
     """JPEG and PNG pages go into the PDF untouched; anything else is re-encoded once."""
+    if path.suffix.lower() in (".heic", ".heif"):
+        enable_heif()
     with Image.open(path) as img:
         upright = img.getexif().get(0x0112, 1) in (0, 1)
         if img.format in ("JPEG", "PNG") and upright and img.mode in ("RGB", "L", "RGBA", "LA", "P", "1"):
@@ -44,6 +45,7 @@ def _page_bytes(path: Path) -> tuple[bytes, tuple[int, int]]:
 
 
 def images_to_pdf(pages: list[Path], dst: Path) -> None:
+    import pymupdf
     doc = pymupdf.open()
     scale = 72 / PDF_DPI
     for path in pages:
@@ -94,6 +96,7 @@ def _page_image(doc, page) -> tuple[bytes, str] | None:
 
 @converter(inputs={"pdf"}, outputs=WRITABLE, terminal=True)
 def pdf_to_comic(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
+    import pymupdf
     work = dst.parent / "_pages"
     work.mkdir()
     zoom = PDF_DPI / 72
