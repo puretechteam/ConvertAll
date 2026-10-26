@@ -24,7 +24,9 @@ dependencies = [
     "puremagic>=1.20",
     "markdown>=3.5",
     "markdownify>=0.13",
+    "beautifulsoup4>=4.12",
     "mammoth>=1.8",
+    "numpy>=1.26",
     "trimesh>=4.4",
     "scipy>=1.13",
     "networkx>=3",
@@ -34,18 +36,24 @@ dependencies = [
     "ezdxf>=1.3",
     "pydicom>=3.0",
     "pyjpegls>=1.2",
-    "meshport @ git+https://github.com/puretechteam/meshport",
-    "packport @ git+https://github.com/puretechteam/packport",
+    # pinned to a release tag, so a later push to either repo can't change what ConvertAll installs
+    "meshport @ git+https://github.com/puretechteam/meshport@v0.2.0",
+    "packport @ git+https://github.com/puretechteam/packport@v0.2.0",
     "vtracer>=0.6",
     "pysubs2>=1.7",
     "pycdlib>=1.14",
     "lz4>=4",
     "brotli>=1.1",
     "olefile>=0.46",
+    "backports.zstd>=1.0; python_version < '3.14'",  # Python 3.14 has compression.zstd built in
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pyinstaller>=6"]
+dev = ["pytest>=8", "pyinstaller>=6", "ruff>=0.16,<0.17"]
+
+[project.urls]
+Source = "https://github.com/puretechteam/ConvertAll"
+Changelog = "https://github.com/puretechteam/ConvertAll/blob/main/CHANGELOG.md"
 
 [project.scripts]
 convertall = "convertall.cli:main"
@@ -61,3 +69,6 @@ convertall = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = ["app", "build", "dist"]

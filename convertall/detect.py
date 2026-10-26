@@ -77,7 +77,7 @@ def _sniff(path: Path) -> str | None:
         for start, fmt in _TEXT_STARTS:
             if text.upper().startswith(start):
                 return fmt
-        if text.startswith(b"<?xml") or text.startswith(b"<"):
+        if text.startswith(b"<"):  # <?xml or a bare root tag
             for tag, fmt in ((b"<gpx", "gpx"), (b"<kml", "kml"), (b"<tt ", "ttml"), (b"<tt>", "ttml")):
                 if tag in head:
                     return fmt
@@ -89,7 +89,7 @@ def _sniff(path: Path) -> str | None:
             ext = normalize(_MAGIC_MAP.get(match.extension.lstrip("."), match.extension))
             if ext in FORMATS:
                 return ext
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - puremagic chokes on some files; then it's unknown
         pass
     return None
 

@@ -12,9 +12,9 @@ Edge flags:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from . import engines
 from .errors import NoRouteError

@@ -19,6 +19,7 @@ from convertall.formats import FORMATS, category, suggest
 
 from .samples import SUB_CODEC, Samples
 
+
 def expected_error(src: str, dst: str) -> str | None:
     """Conversions these samples can't do, and the error the user sees instead."""
     if category(dst) == "Subtitle" and category(src) in ("Video", "Audio") and src not in SUB_CODEC:
@@ -98,7 +99,7 @@ def check(path: Path, fmt: str) -> None:
         probe = _ffprobe()
         if probe:
             kinds = subprocess.run([probe, "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
-                                    str(path)], capture_output=True, text=True).stdout.replace(",", " ").split()
+                                    str(path)], capture_output=True, text=True, check=False).stdout.replace(",", " ").split()
             want = "audio" if cat == "Audio" else "video"
             assert want in kinds, f"{path.name} has no {want} stream ({kinds})"
     elif cat == "Subtitle":

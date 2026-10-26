@@ -10,7 +10,8 @@ from ..detect import COMICS
 from ..errors import ConversionError
 from ..registry import converter
 from .archives import compress, extract_to
-from .images import READ as PIL_READ, enable_heif, prepare
+from .images import READ as PIL_READ
+from .images import enable_heif, prepare
 from .pdf import PDF_DPI
 
 PAGE_EXT = {f".{e}" for e in PIL_READ} | {".jpeg", ".jpe", ".jfif", ".tif", ".heif"}
@@ -23,7 +24,7 @@ def _natural(p: Path) -> list:
 
 
 def _pages(root: Path) -> list[Path]:
-    hidden = lambda p: any(part.startswith((".", "__MACOSX")) for part in p.relative_to(root).parts)  # noqa: E731
+    hidden = lambda p: any(part.startswith((".", "__MACOSX")) for part in p.relative_to(root).parts)
     pages = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in PAGE_EXT and not hidden(p)]
     return sorted(pages, key=lambda p: _natural(p.relative_to(root)))
 

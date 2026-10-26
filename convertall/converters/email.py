@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..errors import ConversionError
 from ..registry import converter
+from ..textfile import decode
 from .markup import page
 
 
@@ -85,7 +86,7 @@ def _msg_date(ole) -> str:
     ticks = found.get(0x0039) or found.get(0x0E06)
     if not ticks:
         return ""
-    when = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(microseconds=ticks // 10)
+    when = dt.datetime(1601, 1, 1, tzinfo=dt.UTC) + dt.timedelta(microseconds=ticks // 10)
     return email.utils.format_datetime(when.astimezone())
 
 
@@ -109,10 +110,7 @@ def _read_msg(src: Path) -> Mail:
         mail.text = body if isinstance(body, str) else ""
         raw_html = _msg_prop(ole, "1013")
         if isinstance(raw_html, bytes):
-            try:
-                mail.html = raw_html.decode("utf-8")
-            except UnicodeDecodeError:
-                mail.html = raw_html.decode("cp1252", "replace")
+            mail.html = decode(raw_html)
         elif isinstance(raw_html, str):
             mail.html = raw_html
         for storage in sorted({e[0] for e in ole.listdir() if e[0].startswith("__attach_version1.0_#")}):
@@ -227,5 +225,5 @@ def mht_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
             if ref:
                 page_html = page_html.replace(str(ref), uri)
     # written as UTF-8 now, whatever the page said before
-    page_html = re.sub(r"""(<meta[^>]*charset=["']?)[\w-]+""", r"\1utf-8", page_html, flags=re.I)
+    page_html = re.sub(r"""(<meta[^>]*charset=["']?)[\w-]+""", r"\1utf-8", page_html, flags=re.IGNORECASE)
     dst.write_text(page_html, encoding="utf-8")

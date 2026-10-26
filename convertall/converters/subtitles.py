@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..errors import ConversionError
 from ..registry import converter
+from ..textfile import read_text
 from .media import VIDEO_IN, ffmpeg
 
 TEXT_SUBS = {"srt", "vtt"}
@@ -37,7 +38,7 @@ def _stamp(t: str, sep: str) -> str:
 
 def _cues(src: Path) -> list[tuple[str, str, list[str]]]:
     cues = []
-    for block in _blocks(src.read_text(encoding="utf-8-sig", errors="replace")):
+    for block in _blocks(read_text(src)):
         idx = next((i for i, line in enumerate(block) if "-->" in line), None)
         if idx is None:  # WEBVTT header, NOTE, STYLE, REGION, or junk
             continue
@@ -72,7 +73,7 @@ def _sbv_time(t: str) -> int:
 def _read_sbv(src: Path):
     import pysubs2
     subs = pysubs2.SSAFile()
-    for block in _blocks(src.read_text(encoding="utf-8-sig", errors="replace")):
+    for block in _blocks(read_text(src)):
         try:
             a, b = block[0].split(",")
             start, end = _sbv_time(a), _sbv_time(b)

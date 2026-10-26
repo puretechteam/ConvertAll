@@ -7,7 +7,8 @@ from PIL import Image
 
 from ..errors import ConversionError
 from ..registry import converter
-from .images import WRITE as IMAGE_OUT, prepare, save_image
+from .images import WRITE as IMAGE_OUT
+from .images import prepare, save_image
 
 # Series become one file only where viewers expect several frames (animation / pages);
 # anything else (e.g. PNG) gets a folder of frames.

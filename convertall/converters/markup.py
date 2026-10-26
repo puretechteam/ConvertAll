@@ -4,6 +4,7 @@ import html
 from pathlib import Path
 
 from ..registry import converter
+from ..textfile import read_text
 
 _PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>{title}</title>
@@ -23,7 +24,7 @@ def page(title: str, body: str) -> str:
 @converter(inputs={"md"}, outputs={"html"})
 def markdown_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import markdown
-    text = src.read_text(encoding="utf-8-sig")
+    text = read_text(src)
     body = markdown.markdown(text, extensions=["extra", "sane_lists"])
     dst.write_text(page(src.stem, body), encoding="utf-8")
 
@@ -32,7 +33,7 @@ def markdown_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 def html_to_markdown(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     from bs4 import BeautifulSoup
     from markdownify import markdownify
-    soup = BeautifulSoup(src.read_text(encoding="utf-8-sig", errors="replace"), "html.parser")
+    soup = BeautifulSoup(read_text(src), "html.parser")
     for tag in soup(["script", "style", "head"]):
         tag.decompose()
     body = soup.body or soup

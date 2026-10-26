@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..errors import ConversionError
 from ..registry import converter
+from ..textfile import read_text
 
 # ---- content lines
 
@@ -99,14 +100,6 @@ def _components(text: str, kind: str) -> list[list[tuple[str, dict, str]]]:
         elif cur is not None and depth == 0:
             cur.append((name, params, value))
     return found
-
-
-def _read_text(src: Path) -> str:
-    data = src.read_bytes()
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return data.decode("cp1252", "replace")
 
 
 # ---- tables in and out
@@ -357,23 +350,24 @@ def _parse_when(date: str, time: str = "") -> tuple[dt.datetime | dt.date | None
     date, time = str(date).strip(), str(time).strip()
     if not date:
         return None, False
-    utc = date.endswith("Z") or date.endswith("+00:00")
+    utc = date.endswith(("Z", "+00:00"))
     try:
-        t = dt.datetime.fromisoformat(date.replace("Z", "+00:00"))
+        t = dt.datetime.fromisoformat(date)
         if t.tzinfo is not None:
-            t = t.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            t = t.astimezone(dt.UTC).replace(tzinfo=None)
             utc = True
         if len(date) == 10 and not time:
             return t.date(), False
         day = t
     except ValueError:
-        day = next((dt.datetime.strptime(date, f) for f in _DATE_FORMATS if _try(date, f)), None)
+        day = next((dt.datetime.strptime(date, f) for f in _DATE_FORMATS if _try(date, f)), None)  # noqa: DTZ007 - floating time
         if day is None:
             return None, False
         if not time:
             return day.date(), False
     if time:
-        clock = next((dt.datetime.strptime(time.upper(), f) for f in _TIME_FORMATS if _try(time.upper(), f)), None)
+        clock = next((dt.datetime.strptime(time.upper(), f)  # noqa: DTZ007 - floating time
+                      for f in _TIME_FORMATS if _try(time.upper(), f)), None)
         if clock:
             day = day.replace(hour=clock.hour, minute=clock.minute, second=clock.second)
     return day, utc
@@ -381,7 +375,7 @@ def _parse_when(date: str, time: str = "") -> tuple[dt.datetime | dt.date | None
 
 def _try(text: str, fmt: str) -> bool:
     try:
-        dt.datetime.strptime(text, fmt)
+        dt.datetime.strptime(text, fmt)  # noqa: DTZ007 - only checks the format
         return True
     except ValueError:
         return False
@@ -395,7 +389,7 @@ def _ics_value(v, utc: bool) -> tuple[str, str]:
 
 
 def write_events(records: list[dict]) -> str:
-    now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    now = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Pure Tech//ConvertAll//EN", "CALSCALE:GREGORIAN"]
     count = 0
     for rec in records:
@@ -439,7 +433,7 @@ def write_events(records: list[dict]) -> str:
 
 @converter(inputs={"vcf", "ics"}, outputs={"csv", "json"})
 def to_table(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    text = _read_text(src)
+    text = read_text(src)
     records = read_vcards(text) if src_fmt == "vcf" else read_events(text)
     if not records:
         raise ConversionError("No contacts found in this file" if src_fmt == "vcf" else "No events found in this file")

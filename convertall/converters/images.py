@@ -84,7 +84,7 @@ def write_xpm(img: Image.Image, dst: Path) -> None:
     w, h = rgba.size
     lines = [f'"{w} {h} {len(used)} {cpp}"']
     for idx in used:
-        color = "None" if idx == clear else "#%02X%02X%02X" % tuple(palette[3 * idx: 3 * idx + 3])
+        color = "None" if idx == clear else "#{:02X}{:02X}{:02X}".format(*palette[3 * idx: 3 * idx + 3])
         lines.append(f'"{code[idx]} c {color}"')
     for y in range(h):
         lines.append('"' + "".join(code[v] for v in px[y * w:(y + 1) * w]) + '"')
@@ -124,9 +124,9 @@ def prepare(img: Image.Image, fmt: str) -> Image.Image:
         if fmt == "xbm":  # black and white only
             return img.convert("1")
         return img if img.mode in ("RGB", "L") else img.convert("RGB")
-    if fmt in ("heic", "avif", "webp", "dds", "qoi", "icns", "ico", "jp2", "tga", "bmp", "tiff", "png", "sgi"):
-        if img.mode not in ("RGB", "RGBA", "L") or (fmt in ("heic", "avif", "dds", "qoi", "icns") and img.mode == "L"):
-            return img.convert("RGBA" if has_alpha else "RGB")
+    if fmt in ("heic", "avif", "webp", "dds", "qoi", "icns", "ico", "jp2", "tga", "bmp", "tiff", "png", "sgi") and (
+            img.mode not in ("RGB", "RGBA", "L") or (fmt in ("heic", "avif", "dds", "qoi", "icns") and img.mode == "L")):
+        return img.convert("RGBA" if has_alpha else "RGB")
     return img
 
 
@@ -194,7 +194,7 @@ def trace_to_svg(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
                                            corner_threshold=60, length_threshold=4.0, splice_threshold=45,
                                            path_precision=3)
     if key:
-        svg = re.sub(r'<path [^>]*fill="#%02X%02X%02X"[^>]*/>\s*' % key, "", svg)
+        svg = re.sub(r'<path [^>]*fill="#{:02X}{:02X}{:02X}"[^>]*/>\s*'.format(*key), "", svg)
     dst.write_text(svg, encoding="utf-8")
 
 

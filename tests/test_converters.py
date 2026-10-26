@@ -167,7 +167,7 @@ def tree(tmp_path):
 
 
 def _same_tree(a, b):
-    files = lambda r: {p.relative_to(r).as_posix(): p.read_bytes() for p in r.rglob("*") if p.is_file()}  # noqa: E731
+    files = lambda r: {p.relative_to(r).as_posix(): p.read_bytes() for p in r.rglob("*") if p.is_file()}
     return files(a) == files(b)
 
 

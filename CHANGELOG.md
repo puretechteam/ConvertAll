@@ -2,6 +2,18 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## 2026-10-26: Safer 3D files, old Windows text files, and the app moves to Releases (part of 1.1.0)
+
+- **Fixed (security):** a 3D model's texture paths could name any file on the computer, and converting the model to FBX, 3DS or OBJ copied that file into the output. ConvertAll now uses [meshport 0.2.0](https://github.com/puretechteam/meshport/blob/main/CHANGELOG.md), which only takes files that are really images and never opens network paths.
+- **Fixed:** subtitles, web pages, HTML → PDF, CSV, JSON, YAML, TOML, XML and INI files saved in older Windows encodings (Windows-1252) or as "Unicode" (UTF-16) keep their accented letters. Before, accents turned into "�" in some conversions and CSV files from Excel failed outright. One shared reader (`convertall/textfile.py`) replaces three copies of the same fallback.
+- **Fixed:** an unexpected error during a conversion or engine install could leave the window's progress bar spinning forever. It now shows the error.
+- **Changed:** when Explorer hands files to an already open window, the sending process now waits until the whole list is written, and the window waits until the sender is done, instead of both assuming the list goes across in one piece. A test sends 5,000 file names (665 KB) between two processes.
+- **Changed:** CPIO archives are extracted by [packport 0.2.0](https://github.com/puretechteam/packport/blob/main/CHANGELOG.md), which streams them to disk instead of loading them into memory.
+- **Changed:** the ready-to-run app is no longer kept in the repository's `app` folder (369 MB per build, in every clone). Download it as a zip from [Releases](https://github.com/puretechteam/ConvertAll/releases/latest); `packaging/release.py` builds the zip.
+- **Changed:** meshport and packport are pinned to their `v0.2.0` tags, and the libraries ConvertAll imports directly (Beautiful Soup, NumPy, backports.zstd before Python 3.14) are listed as dependencies instead of arriving by chance through other packages.
+- **Changed:** the window starts a little faster: the download code for Ghostscript loads only when Ghostscript is being installed. Ghostscript downloads are also only accepted from Artifex's own GitHub releases.
+- **Added:** GitHub Actions run the tests and `ruff check` on every push and pull request, plus `CONTRIBUTING.md` and `SECURITY.md`. The code passes ruff 0.16's default rules.
+
 ## 2026-10-26: Extract from the right-click menu, every archive type, and 62 more formats (1.1.0)
 
 ConvertAll now reads 245 formats (was 183) and writes 150 (was 116).

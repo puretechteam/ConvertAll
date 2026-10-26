@@ -8,7 +8,9 @@ from PIL import Image
 
 from ..errors import ConversionError
 from ..registry import converter
-from .images import WRITE as RASTER_OUT, prepare, save_image
+from ..textfile import read_text
+from .images import WRITE as RASTER_OUT
+from .images import prepare, save_image
 
 RASTER_OUT = RASTER_OUT - {"pdf", "eps"}  # PDF -> EPS stays vector (Ghostscript)
 PAGED = {"pdf", "xps", "oxps"}
@@ -18,6 +20,7 @@ PDF_DPI = 150
 def open_doc(src: Path):
     """PyMuPDF document for src; .svgz (gzipped SVG) is unpacked first."""
     import gzip
+
     import pymupdf
     with src.open("rb") as f:
         zipped = f.read(2) == b"\x1f\x8b"
@@ -94,7 +97,7 @@ _CSS = "* {font-family: sans-serif; font-size: 11pt; line-height: 1.4} pre, code
 @converter(inputs={"html", "txt"}, outputs={"pdf"}, cost=2)
 def html_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import pymupdf
-    text = src.read_text(encoding="utf-8", errors="replace")
+    text = read_text(src)
     if src_fmt == "txt":
         text = f"<pre style='white-space: pre-wrap'>{html.escape(text)}</pre>"
     story = pymupdf.Story(html=text, user_css=_CSS, archive=str(src.parent))

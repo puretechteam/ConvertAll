@@ -3,6 +3,7 @@
 import configparser
 import csv
 import datetime as dt
+import io
 import json
 import plistlib
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from ..errors import ConversionError
 from ..registry import converter
+from ..textfile import read_text
 
 TREE = {"json", "jsonl", "yaml", "toml", "xml", "ini", "plist"}
 TABLE = {"csv", "tsv", "xlsx", "sqlite"}
@@ -70,7 +72,7 @@ def _scalar(v) -> str:
 # ---- load / dump ----
 
 def load(path: Path, fmt: str):
-    text = lambda: path.read_text(encoding="utf-8-sig")  # noqa: E731
+    text = lambda: read_text(path)
     if fmt == "json":
         return json.loads(text())
     if fmt == "jsonl":
@@ -98,11 +100,9 @@ def load(path: Path, fmt: str):
             cp.read_string("[DEFAULT]\n" + text())
         return {s: dict(cp[s]) for s in cp.sections()}
     if fmt in ("csv", "tsv"):
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            delim = "\t" if fmt == "tsv" else _sniff_delim(sample)
-            return list(csv.DictReader(f, delimiter=delim))
+        body = text()  # Excel's "CSV" is often Windows-1252, its "Unicode text" UTF-16
+        delim = "\t" if fmt == "tsv" else _sniff_delim(body[:4096])
+        return list(csv.DictReader(io.StringIO(body, newline=""), delimiter=delim))
     if fmt == "xlsx":
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -296,7 +296,7 @@ def _dump_sqlite(data, path: Path) -> None:
         for name, rows in tables.items():
             recs = _records(rows)
             cols = list(dict.fromkeys(k for r in recs for k in r)) or ["value"]
-            quote = lambda s: '"{}"'.format(str(s).replace('"', '""'))  # noqa: E731
+            quote = lambda s: '"{}"'.format(str(s).replace('"', '""'))
             defs = ", ".join(f"{quote(c)} {_sql_type(r.get(c) for r in recs)}" for c in cols)
             con.execute(f"CREATE TABLE {quote(name)} ({defs})")
             con.executemany(f"INSERT INTO {quote(name)} VALUES ({', '.join('?' * len(cols))})",

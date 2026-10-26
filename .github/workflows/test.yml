@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # ConvertAll is a Windows app (registry, winget, Explorer menu); tests for missing engines skip
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen

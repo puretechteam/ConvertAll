@@ -11,9 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .errors import ConversionError
 
@@ -145,14 +144,16 @@ GS_KNOWN = ("https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/down
 
 def _latest_ghostscript() -> tuple[str, str]:
     """(url, sha256) of the newest 64-bit Windows build; the known-good one if GitHub can't say."""
+    import urllib.request
     try:
         with urllib.request.urlopen(GS_RELEASES, timeout=20) as r:
             release = json.load(r)
         asset = next(a for a in release["assets"] if a["name"].endswith("w64.exe"))
         algo, digest = asset["digest"].split(":", 1)
-        if algo == "sha256":
-            return asset["browser_download_url"], digest
-    except Exception:
+        url = asset["browser_download_url"]
+        if algo == "sha256" and url.startswith(GS_KNOWN[0].rsplit("/", 2)[0] + "/"):  # Artifex's own releases
+            return url, digest
+    except Exception:  # noqa: BLE001, S110 - offline, rate-limited or a changed API: use the known build
         pass
     return GS_KNOWN
 
@@ -160,6 +161,7 @@ def _latest_ghostscript() -> tuple[str, str]:
 def _download_ghostscript(log: Callable[[str], None] | None) -> None:
     """Download the official release, check its SHA-256, and unpack only its programs (bin:
     gswin64c.exe and the DLL, which has fonts and startup files built in)."""
+    import urllib.request
     url, sha256 = _latest_ghostscript()
     if not available("7zip"):
         install("7zip", log)
@@ -215,7 +217,7 @@ def install(key: str, log: Callable[[str], None] | None = None) -> bool:
 def run(args: list[str], timeout: float | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
     """Run an engine command, raising ConversionError with the tail of its output on failure."""
     proc = subprocess.run([str(a) for a in args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", creationflags=NO_WINDOW, timeout=timeout, cwd=cwd)
+                          errors="replace", creationflags=NO_WINDOW, timeout=timeout, cwd=cwd, check=False)
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise ConversionError("\n".join(msg[-6:]) or f"{args[0]} failed ({proc.returncode})")

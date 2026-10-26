@@ -7,7 +7,6 @@ from convertall.detect import detect, strip_ext
 from convertall.errors import EngineMissingError, NoRouteError
 from convertall.pipeline import convert, unique_path
 
-
 # ---- detection & naming
 
 @pytest.mark.parametrize("name,fmt", [
@@ -110,3 +109,25 @@ def test_common_targets_for_batch():
     common = registry.common_targets(["png", "mp4"])
     assert "jpg" in common and "zip" in common
     assert "mp3" not in common
+
+
+# ---- text files of unknown encoding
+
+def test_text_files_in_any_common_encoding(tmp_path):
+    from convertall.textfile import decode
+    assert decode("café".encode()) == "café"
+    assert decode("café".encode("utf-8-sig")) == "café"
+    assert decode("café".encode("cp1252")) == "café"  # older Windows files
+    assert decode("café".encode("utf-16")) == "café"  # Notepad's and Excel's "Unicode"
+
+
+def test_windows_1252_subtitles_keep_their_accents(tmp_path):
+    src = tmp_path / "old.srt"
+    src.write_bytes("1\r\n00:00:01,000 --> 00:00:02,000\r\nDéjà vu, señor\r\n".encode("cp1252"))
+    assert "Déjà vu, señor" in convert(src, "vtt").read_text(encoding="utf-8")
+
+
+def test_windows_1252_csv_converts(tmp_path):
+    src = tmp_path / "excel.csv"
+    src.write_bytes("name,city\r\nZoë,Zürich\r\n".encode("cp1252"))
+    assert '"city": "Zürich"' in convert(src, "json").read_text(encoding="utf-8")

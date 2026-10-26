@@ -7,17 +7,48 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from dataclasses import dataclass
-
-from PySide6.QtCore import QLockFile, QPoint, QPointF, QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
+from PySide6.QtCore import (
+    QLockFile,
+    QPoint,
+    QPointF,
+    QSettings,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QToolButton,
-    QVBoxLayout, QWidget,
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from . import __version__, engines, pipeline, registry
@@ -30,10 +61,10 @@ ASSETS = Path(__file__).resolve().parent / "assets"  # PyInstaller places them h
 SERVER_NAME = f"ConvertAll-{getpass.getuser()}"
 EXTRACT_SETTLE_MS = 1000  # right-click Extract on several archives: wait for all their processes
 
-LIGHT = dict(bg="#f7f7f8", surface="#ffffff", text="#18181b", muted="#71717a", border="#d4d4d8",
-             accent="#6366f1", accent_text="#ffffff", accent_soft="#eef2ff", error="#dc2626", ok="#16a34a")
-DARK = dict(bg="#18181b", surface="#232326", text="#f4f4f5", muted="#a1a1aa", border="#3f3f46",
-            accent="#818cf8", accent_text="#0b0b10", accent_soft="#26264a", error="#f87171", ok="#4ade80")
+LIGHT = {"bg": "#f7f7f8", "surface": "#ffffff", "text": "#18181b", "muted": "#71717a", "border": "#d4d4d8",
+         "accent": "#6366f1", "accent_text": "#ffffff", "accent_soft": "#eef2ff", "error": "#dc2626", "ok": "#16a34a"}
+DARK = {"bg": "#18181b", "surface": "#232326", "text": "#f4f4f5", "muted": "#a1a1aa", "border": "#3f3f46",
+        "accent": "#818cf8", "accent_text": "#0b0b10", "accent_soft": "#26264a", "error": "#f87171", "ok": "#4ade80"}
 
 QSS = """
 QWidget {{ background: {bg}; color: {text}; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-size: 10pt; }}
@@ -115,8 +146,8 @@ class Job(QThread):
             try:
                 if not engines.install(key):
                     errors.append(f"Couldn't install {name}")
-            except ConversionError as exc:
-                errors.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - the window must always hear back
+                errors.append(str(exc) if isinstance(exc, ConversionError) else f"Couldn't install {name}: {exc}")
         if errors:
             self.done.emit(outputs, errors)
             return
@@ -128,6 +159,8 @@ class Job(QThread):
                 outputs.append(out)
             except (ConversionError, OSError) as exc:
                 errors.append(f"{f.name}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - a surprise must not leave the window spinning forever
+                errors.append(f"{f.name}: unexpected {type(exc).__name__}: {exc}")
         self.done.emit(outputs, errors)
 
 
@@ -141,7 +174,7 @@ class InstallJob(QThread):
     def run(self) -> None:
         try:
             self.finished_ok.emit(engines.install(self.key), "")
-        except ConversionError as exc:
+        except Exception as exc:  # noqa: BLE001 - the dialog must always hear back
             self.finished_ok.emit(False, str(exc))
 
 
@@ -906,15 +939,18 @@ def remove_context_menu() -> None:
 EXTRACT_MARKER = "--extract"  # first line of a forwarded message: extract these, don't convert
 
 
-def _forward_to_running(files: list[str], extract: bool = False) -> bool:
+def _forward_to_running(files: list[str], extract: bool = False, server: str = SERVER_NAME) -> bool:
     """If ConvertAll is already open, hand it our files and let it handle them."""
     sock = QLocalSocket()
-    sock.connectToServer(SERVER_NAME)
+    sock.connectToServer(server)
     if not sock.waitForConnected(300):
         return False
     sock.write("\n".join([EXTRACT_MARKER] * extract + files).encode("utf-8"))
-    sock.waitForBytesWritten(1000)
+    while sock.bytesToWrite() and sock.waitForBytesWritten(1000):
+        pass  # a long list goes out in several writes; this process may exit right after
     sock.disconnectFromServer()
+    if sock.state() != QLocalSocket.UnconnectedState:
+        sock.waitForDisconnected(1000)
     return True
 
 
@@ -922,6 +958,30 @@ def parse_message(data: str) -> tuple[list[Path], bool]:
     lines = [ln for ln in data.splitlines() if ln.strip()]
     extract = bool(lines) and lines[0] == EXTRACT_MARKER
     return [Path(p) for p in lines[extract:]], extract
+
+
+def listen(server: QLocalServer, handle) -> None:
+    """Call handle(message) for each message another ConvertAll process sends. A long file list
+    can arrive in pieces, so each is handled once its sender hangs up."""
+    def on_connection():
+        conn = server.nextPendingConnection()
+        buf = bytearray()
+
+        def read():
+            buf.extend(bytes(conn.readAll()))
+
+        def done():
+            if conn.property("handled"):
+                return
+            conn.setProperty("handled", True)
+            read()
+            handle(buf.decode("utf-8", "replace"))
+            conn.deleteLater()
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(done)
+        if conn.state() == QLocalSocket.UnconnectedState:  # it was over before we got here
+            done()
+    server.newConnection.connect(on_connection)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -959,19 +1019,14 @@ def main(argv: list[str] | None = None) -> int:
     QLocalServer.removeServer(SERVER_NAME)
     server.listen(SERVER_NAME)
 
-    def on_connection():
-        conn = server.nextPendingConnection()
-
-        def read():
-            paths, extract_them = parse_message(bytes(conn.readAll()).decode("utf-8"))
-            if paths:
-                win.add_files_from_other_instance(paths, extract_them)
-            else:
-                win.raise_()
-                win.activateWindow()
-        conn.readyRead.connect(read)
-        conn.disconnected.connect(conn.deleteLater)
-    server.newConnection.connect(on_connection)
+    def on_message(text: str):
+        paths, extract_them = parse_message(text)
+        if paths:
+            win.add_files_from_other_instance(paths, extract_them)
+        else:
+            win.raise_()
+            win.activateWindow()
+    listen(server, on_message)
 
     win.show()
     if files:

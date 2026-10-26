@@ -11,7 +11,6 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-
 try:
     from compression import zstd  # Python 3.14+
 except ImportError:
@@ -32,7 +31,7 @@ class _BrotliFile(io.RawIOBase):
         import brotli
         super().__init__()
         self._writing = "w" in mode
-        self._f = open(path, "wb" if self._writing else "rb")
+        self._f = open(path, "wb" if self._writing else "rb")  # noqa: SIM115 - closed by close()
         self._codec = brotli.Compressor(quality=quality) if self._writing else brotli.Decompressor()
         self._buf = bytearray()
 
@@ -90,7 +89,7 @@ class _ZReader(io.RawIOBase):
     def __init__(self, path):
         import packport
         super().__init__()
-        self._f = open(path, "rb")
+        self._f = open(path, "rb")  # noqa: SIM115 - closed by close()
         self._codec = packport.ZDecompressor()
         self._buf = bytearray()
         self._done = False
@@ -239,7 +238,7 @@ def _sevenzip_add(src: Path, dst: Path, fmt: str) -> None:
 def _iso_name(name: str, used: set[str], is_dir: bool) -> str:
     """A unique ISO 9660 level 3 name: A-Z 0-9 _, 30 characters, one dot for files."""
     stem, _, ext = name.rpartition(".") if not is_dir and "." in name.strip(".") else (name, "", "")
-    clean = lambda s: re.sub(r"[^A-Z0-9_]", "_", s.upper())  # noqa: E731
+    clean = lambda s: re.sub(r"[^A-Z0-9_]", "_", s.upper())
     stem, ext = clean(stem) or "_", clean(ext)[:3]
     room = 31 if is_dir else 30 - len(ext) - 1
     cand, i = stem[:room], 1
@@ -338,23 +337,11 @@ def extract_to(src: Path, dest: Path, fmt: str) -> None:
 
 
 def _extract_cpio(src: Path, dest: Path) -> None:
-    import stat
-
     import packport
     try:
-        members = packport.read_cpio(src)
+        packport.extract_cpio(src, dest)  # streamed; nothing outside dest, no links
     except packport.PackportError as exc:
         raise ConversionError(str(exc)) from None  # old binary/odc CPIO: 7-Zip takes over
-    root = dest.resolve()
-    for m in members:
-        target = (dest / m.name).resolve()
-        if root not in target.parents or stat.S_ISLNK(m.mode):
-            continue  # nothing outside the folder, no links
-        if m.is_dir:
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(m.data)
 
 
 @converter(inputs={"*"}, outputs=COMPRESS_OUT, terminal=True)

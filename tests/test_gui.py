@@ -6,12 +6,12 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtCore = pytest.importorskip("PySide6.QtCore")
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication
 
-from convertall import gui  # noqa: E402
+from convertall import gui
 
-from .conftest import needs  # noqa: E402
-from .samples import Samples  # noqa: E402
+from .conftest import needs
+from .samples import Samples
 
 
 @pytest.fixture(scope="module")
@@ -170,6 +170,35 @@ def test_forwarded_message_carries_the_extract_marker(tmp_path):
     assert gui.parse_message(f"{a}\n") == ([a], False)
 
 
+def test_a_long_forwarded_file_list_arrives_whole(app, tmp_path):
+    """A second ConvertAll process hands its files to the open window, as Explorer causes."""
+    import json
+    import subprocess
+    import sys
+    import time
+
+    from PySide6.QtNetwork import QLocalServer
+    name = f"ConvertAll-test-{os.getpid()}"
+    server = QLocalServer()
+    QLocalServer.removeServer(name)
+    assert server.listen(name)
+    got = []
+    gui.listen(server, got.append)
+    files = [str(tmp_path / f"file {i:05d} with a longish name é.txt") for i in range(5000)]  # ~400 KB
+    (tmp_path / "files.json").write_text(json.dumps(files), encoding="utf-8")
+    script = ("import json, sys; from PySide6.QtWidgets import QApplication; from convertall import gui; "
+              "app = QApplication([]); files = json.load(open(sys.argv[1], encoding='utf-8')); "
+              "sys.exit(0 if gui._forward_to_running(files, True, sys.argv[2]) else 1)")
+    sender = subprocess.Popen([sys.executable, "-c", script, str(tmp_path / "files.json"), name],
+                              env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    deadline = time.monotonic() + 30
+    while not got and time.monotonic() < deadline:
+        app.processEvents()
+    assert sender.wait(10) == 0
+    server.close()
+    assert gui.parse_message(got[0]) == ([tmp_path / os.path.basename(f) for f in files], True)
+
+
 def _run_now(win):
     """Jobs run on this thread so the test can wait for them."""
     win.run_job = lambda job: (setattr(win, "job", job), job.done.connect(win.job_done), job.run())
@@ -250,4 +279,4 @@ def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
         winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.zip\shell\Other"))
     finally:
         import subprocess
-        subprocess.run(["reg", "delete", rf"HKCU\{root}", "/f"], capture_output=True)
+        subprocess.run(["reg", "delete", rf"HKCU\{root}", "/f"], capture_output=True, check=False)

@@ -420,7 +420,7 @@ class Samples:
             self.cache[fmt] = self._make(fmt, target)
         return self.cache[fmt]
 
-    def _make(self, fmt: str, p: Path) -> Path | None:  # noqa: C901 - one branch per family
+    def _make(self, fmt: str, p: Path) -> Path | None:
         img = picture()
         # images (cursor and pixmap made by hand, so ConvertAll's own writers don't test themselves)
         if fmt == "cur":
