@@ -2,6 +2,17 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## 2026-10-26: A new way to choose the format
+
+- **Changed:** the long dropdown list of formats is replaced by a panel:
+  - a **search box** that filters as you type (by extension or full name, so "bitmap" finds BMP), where Enter picks the first match;
+  - a **Suggested** row with the most common choice, or what you picked last time;
+  - each **kind of file** as a heading over a **grid of format tags**, with the current choice highlighted;
+  - formats that need a one-time engine install shown **dashed**, with a short explanation underneath; hover a tag for the details;
+  - **keyboard support**: arrow keys move through the grid, Enter picks, Esc closes, and typing anywhere goes to the search box.
+- **Changed:** the button shows the chosen format in bold with its full name beside it (for example **OBJ** Wavefront OBJ).
+- **Added:** screenshots of the window and the format panel at the top of the README.
+
 ## 2026-10-25: Faster startup, sturdier 3D parsing
 
 - **Faster:** every conversion starts about a third quicker. Heavy libraries (the PDF engine, 7z, HEIC, fonts, YAML/TOML) now load only when a conversion needs them, not on every run.

@@ -2,7 +2,10 @@
 
 Convert, compress or extract any file. Drop it in, pick a format, done.
 
-<p align="center"><img src="screenshots/preview.png" alt="ConvertAll turning a comic book (.cbr) into a PDF" width="442"></p>
+<p align="center">
+  <img src="screenshots/preview.png" alt="ConvertAll turning a comic book (.cbr) into a PDF" width="420">
+  <img src="screenshots/formats_preview.png" alt="Choosing an output format: search, suggestions and formats grouped by kind" width="420">
+</p>
 
 What's new: see the [changelog](CHANGELOG.md).
 

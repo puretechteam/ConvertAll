@@ -9,12 +9,15 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QFontMetrics, QGuiApplication, QIcon, QStandardItem, QStandardItemModel
+from dataclasses import dataclass
+
+from PySide6.QtCore import QLockFile, QPoint, QPointF, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QMenu, QMessageBox, QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import __version__, engines, pipeline, registry
@@ -41,11 +44,22 @@ QWidget {{ background: {bg}; color: {text}; font-family: "Segoe UI Variable Text
 #muted, #dropSub {{ color: {muted}; }}
 #status[state="error"] {{ color: {error}; }}
 #status[state="ok"] {{ color: {ok}; }}
-QComboBox {{ combobox-popup: 0; background: {surface}; border: 1px solid {border}; border-radius: 8px; padding: 7px 10px; min-height: 20px; }}
-QComboBox:disabled {{ color: {muted}; }}
-QComboBox::drop-down {{ border: none; width: 24px; }}
-QComboBox QAbstractItemView {{ background: {surface}; border: 1px solid {border}; selection-background-color: {accent_soft}; selection-color: {text}; outline: 0; padding: 4px; }}
 QPushButton {{ background: {surface}; border: 1px solid {border}; border-radius: 8px; padding: 8px 16px; }}
+QPushButton#picker {{ min-height: 20px; }}
+QPushButton#picker[open="true"] {{ border-color: {accent}; }}
+#popup {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; }}
+#popup QWidget {{ background: transparent; }}
+#popup QLineEdit {{ background: {bg}; border: 1px solid {border}; border-radius: 8px; padding: 7px 10px; }}
+#popup QLineEdit:focus {{ border-color: {accent}; }}
+#section {{ color: {muted}; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }}
+#legend, #empty {{ color: {muted}; font-size: 8.5pt; }}
+QPushButton#chip {{ background: {bg}; border: 1px solid {border}; border-radius: 7px; padding: 6px 0; font-size: 9pt; font-weight: 600; }}
+QPushButton#chip:hover, QPushButton#chip:focus {{ border-color: {accent}; outline: none; }}
+QPushButton#chip[needs="true"] {{ color: {muted}; border-style: dashed; }}
+QPushButton#chip[selected="true"] {{ background: {accent}; color: {accent_text}; border-color: {accent}; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {border}; border-radius: 3px; min-height: 24px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ height: 0; background: none; }}
 QPushButton:hover {{ border-color: {accent}; }}
 QPushButton:disabled {{ color: {muted}; }}
 QPushButton#primary {{ background: {accent}; color: {accent_text}; border: none; font-weight: 600; }}
@@ -61,12 +75,16 @@ QMenu::item:selected {{ background: {accent_soft}; }}
 """
 
 
+THEME = dict(DARK)  # the palette in use, for widgets that paint themselves
+
+
 def is_dark() -> bool:
     return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
 
 
 def apply_theme(app: QApplication) -> None:
-    app.setStyleSheet(QSS.format(**(DARK if is_dark() else LIGHT)))
+    THEME.update(DARK if is_dark() else LIGHT)
+    app.setStyleSheet(QSS.format(**THEME))
 
 
 def reveal(path: Path) -> None:
@@ -185,6 +203,297 @@ class DropZone(QFrame):
                 self.files_dropped.emit([Path(n) for n in names])
 
 
+@dataclass
+class Option:
+    fmt: str            # "png"
+    kind: str           # "Image"
+    name: str           # "Portable Network Graphics", or "" when it would just repeat the extension
+    needs: list[str]    # engines still to install, by display name
+
+
+class FormatPicker(QPushButton):
+    """Looks like a dropdown; opens a searchable grid of formats grouped by kind."""
+    changed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("picker")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName("Output format")
+        self.options: list[Option] = []
+        self.suggested: list[str] = []
+        self._current: str | None = None
+        self.placeholder = "Choose a format"
+        self.popup: FormatPopup | None = None
+        self.clicked.connect(self.showPopup)
+
+    # -- data
+
+    def set_options(self, options: list[Option], current: str | None, suggested: list[str]) -> None:
+        self.options = options
+        self.suggested = [s for s in suggested if any(o.fmt == s for o in options)]
+        self._current = current if any(o.fmt == current for o in options) else None
+        self.update()
+
+    def clear(self, placeholder: str) -> None:
+        self.options, self.suggested, self._current, self.placeholder = [], [], None, placeholder
+        self.update()
+
+    def formats(self) -> list[str]:
+        return [o.fmt for o in self.options]
+
+    def current(self) -> str | None:
+        return self._current
+
+    def set_current(self, fmt: str) -> None:
+        if fmt in self.formats() and fmt != self._current:
+            self._current = fmt
+            self.update()
+            self.changed.emit(fmt)
+
+    # -- popup
+
+    def showPopup(self) -> None:
+        if not self.options or not self.isEnabled():
+            return
+        self.popup = FormatPopup(self)
+        self.popup.picked.connect(self.set_current)
+        self.popup.closed.connect(lambda: self._set_open(False))
+        self._set_open(True)
+        self.popup.open_below(self)
+
+    def _set_open(self, on: bool) -> None:
+        self.setProperty("open", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    # -- drawing: bold extension, its full name in grey, a chevron
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)  # the frame from the stylesheet; the text is ours
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.rect().adjusted(12, 0, -34, 0)
+        option = next((o for o in self.options if o.fmt == self._current), None)
+        muted, text = QColor(THEME["muted"]), QColor(THEME["text"])
+        if not self.isEnabled():
+            text = muted
+        bold = QFont(self.font())
+        bold.setWeight(QFont.DemiBold)
+        if option:
+            p.setFont(bold)
+            p.setPen(text)
+            ext = option.fmt.upper()
+            p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, ext)
+            if option.name:
+                x = QFontMetrics(bold).horizontalAdvance(ext) + 10
+                p.setFont(self.font())
+                p.setPen(muted)
+                rest = r.adjusted(x, 0, 0, 0)
+                p.drawText(rest, Qt.AlignVCenter | Qt.AlignLeft,
+                           QFontMetrics(self.font()).elidedText(option.name, Qt.ElideRight, rest.width()))
+        else:
+            p.setPen(muted)
+            p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, self.placeholder)
+        # chevron
+        cx, cy = self.width() - 20, self.height() / 2
+        pen = QPen(muted, 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawPolyline([QPointF(cx - 4.5, cy - 2), QPointF(cx, cy + 2.5), QPointF(cx + 4.5, cy - 2)])
+        p.end()
+
+
+class FormatPopup(QWidget):
+    """The panel under the picker: search, suggestions, then a grid of formats per kind."""
+    picked = Signal(str)
+    closed = Signal()
+    COLUMNS = 4
+
+    def __init__(self, picker: FormatPicker):
+        super().__init__(picker, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.picker = picker
+        self.chips: list[QPushButton] = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 6, 10, 14)  # room for the shadow
+        frame = QFrame()
+        frame.setObjectName("popup")
+        shadow = QGraphicsDropShadowEffect(frame)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 110))
+        frame.setGraphicsEffect(shadow)
+        outer.addWidget(frame)
+
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(12, 12, 12, 10)
+        lay.setSpacing(10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(f"Search {len(picker.options)} formats…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.rebuild)
+        self.search.installEventFilter(self)
+        lay.addWidget(self.search)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(self.scroll, 1)
+
+        if any(o.needs for o in picker.options):
+            legend = QLabel("Dashed formats need a free tool, installed once when you pick them.")
+            legend.setObjectName("legend")
+            legend.setWordWrap(True)
+            lay.addWidget(legend)
+        self.rebuild("")
+
+    # -- content
+
+    def rebuild(self, query: str) -> None:
+        q = query.strip().lower().lstrip(".")
+        options = self.picker.options
+        if q:
+            options = [o for o in options if q in o.fmt or q in o.name.lower() or q in o.kind.lower()]
+        sections: list[tuple[str, list[Option]]] = []
+        if not q and self.picker.suggested:
+            by_fmt = {o.fmt: o for o in options}
+            sections.append(("Suggested", [by_fmt[s] for s in self.picker.suggested]))
+        kinds = list(dict.fromkeys(o.kind for o in options))
+        for kind in kinds:
+            sections.append((kind, sorted((o for o in options if o.kind == kind), key=lambda o: o.fmt)))
+
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 0, 4, 0)
+        col.setSpacing(6)
+        self.chips = []
+        for title, opts in sections:
+            head = QLabel(title.upper())
+            head.setObjectName("section")
+            col.addWidget(head)
+            grid = QGridLayout()
+            grid.setSpacing(6)
+            for i, o in enumerate(opts):
+                grid.addWidget(self._chip(o), i // self.COLUMNS, i % self.COLUMNS)
+            for c in range(self.COLUMNS):
+                grid.setColumnStretch(c, 1)
+            col.addLayout(grid)
+            col.addSpacing(6)
+        if not sections:
+            none = QLabel(f"Nothing matches “{query.strip()}”")
+            none.setObjectName("empty")
+            none.setAlignment(Qt.AlignCenter)
+            col.addWidget(none)
+        col.addStretch()
+        self.scroll.setWidget(body)
+        if getattr(self, "anchor", None) is not None:
+            self._place()
+
+    def _chip(self, o: Option) -> QPushButton:
+        chip = QPushButton(o.fmt.upper())
+        chip.setObjectName("chip")
+        chip.setCursor(Qt.PointingHandCursor)
+        chip.setProperty("selected", o.fmt == self.picker.current())
+        chip.setProperty("needs", bool(o.needs))
+        tip = o.name or o.fmt.upper()
+        if o.needs:
+            tip += f"\nNeeds {' and '.join(o.needs)} (free, installed once)"
+        chip.setToolTip(tip)
+        chip.setProperty("fmt", o.fmt)
+        chip.clicked.connect(lambda _=False, f=o.fmt: self._pick(f))
+        chip.installEventFilter(self)
+        self.chips.append(chip)
+        return chip
+
+    def _pick(self, fmt: str) -> None:
+        self.picked.emit(fmt)
+        self.close()
+
+    # -- placement
+
+    MAX_HEIGHT = 420
+
+    def open_below(self, anchor: QWidget) -> None:
+        self.anchor = anchor
+        self.upwards = None  # decided once, so the panel doesn't jump sides while you type
+        self._place()
+        self.show()
+        self.search.setFocus()
+
+    def _place(self) -> None:
+        """Fit the panel to its content (up to MAX_HEIGHT) and keep it against the picker:
+        below it, or above when the screen has no room below."""
+        anchor = self.anchor
+        width = max(anchor.width() + 20, 340)
+        self.layout().activate()
+        chrome = self.height() - self.scroll.viewport().height() if self.isVisible() else 0
+        if not chrome:
+            frame = self.layout().itemAt(0).widget().layout()
+            chrome = (frame.contentsMargins().top() + frame.contentsMargins().bottom()
+                      + self.layout().contentsMargins().top() + self.layout().contentsMargins().bottom()
+                      + sum(frame.itemAt(i).widget().sizeHint().height() + frame.spacing()
+                            for i in range(frame.count()) if frame.itemAt(i).widget() is not self.scroll))
+        content = self.scroll.widget().sizeHint().height()
+        height = max(min(chrome + content + 4, self.MAX_HEIGHT), self.layout().minimumSize().height())
+        screen = anchor.screen().availableGeometry()
+        top_below = anchor.mapToGlobal(QPoint(0, anchor.height() - 2)).y()
+        if self.upwards is None:
+            self.upwards = top_below + self.MAX_HEIGHT > screen.bottom()
+        y = anchor.mapToGlobal(QPoint(0, 8)).y() - height if self.upwards else top_below
+        x = anchor.mapToGlobal(QPoint(-10, 0)).x()
+        x = max(screen.left(), min(x, screen.right() - width))
+        self.setGeometry(x, y, width, height)
+
+    # -- keyboard: type to filter, Enter picks, arrows move through the grid, Esc closes
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != event.Type.KeyPress:
+            return False
+        key = event.key()
+        visible = self.chips
+        if obj is self.search:
+            if key in (Qt.Key_Return, Qt.Key_Enter) and visible:
+                self._pick(visible[0].property("fmt"))
+                return True
+            if key == Qt.Key_Down and visible:
+                visible[0].setFocus()
+                return True
+            return False
+        if obj in visible:
+            i = visible.index(obj)
+            step = {Qt.Key_Right: 1, Qt.Key_Left: -1, Qt.Key_Down: self.COLUMNS, Qt.Key_Up: -self.COLUMNS}.get(key)
+            if step is not None:
+                j = i + step
+                if j < 0:
+                    self.search.setFocus()
+                else:
+                    visible[min(j, len(visible) - 1)].setFocus()
+                    self.scroll.ensureWidgetVisible(visible[min(j, len(visible) - 1)], 0, 30)
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self._pick(obj.property("fmt"))
+                return True
+            if event.text() and event.text().isprintable():  # typing anywhere goes to the search box
+                self.search.setFocus()
+                self.search.insert(event.text())
+                return True
+        return False
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self.closed.emit()
+        super().hideEvent(event)
+
+
 class EnginesDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -265,11 +574,9 @@ class Window(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.combo = QComboBox()
-        self.combo.setMaxVisibleItems(18)
-        self.combo.setEnabled(False)
-        self.combo.addItem("Choose a format")
-        row.addWidget(self.combo, 1)
+        self.picker = FormatPicker()
+        self.picker.setEnabled(False)
+        row.addWidget(self.picker, 1)
         self.convert_btn = QPushButton("Convert")
         self.convert_btn.setObjectName("primary")
         self.convert_btn.setEnabled(False)
@@ -323,48 +630,30 @@ class Window(QWidget):
         engines.refresh()  # pick up engines installed since the last drop
         self.drop.show_files(paths, self.fmts)
         self.routes = registry.common_targets(self.fmts)
-        self.fill_combo()
+        self.fill_picker()
         self.extract_btn.setVisible(all(pipeline.can_extract(f) for f in self.fmts))
         self.set_status("")
         self.show_btn.hide()
         self.bar.hide()
 
-    def fill_combo(self) -> None:
-        model = QStandardItemModel()
-        by_cat: dict[str, list[str]] = {}
-        for dst in self.routes:
-            by_cat.setdefault(category(dst), []).append(dst)
-        own = category(self.fmts[0])
-        for cat in sorted(CATEGORIES, key=lambda c: c != own):  # the file's own kind first
-            if cat not in by_cat:
-                continue
-            header = QStandardItem(cat.upper())
-            header.setFlags(Qt.NoItemFlags)
-            font = header.font()
-            font.setBold(True)
-            font.setPointSizeF(font.pointSizeF() * 0.85)
-            header.setFont(font)
-            model.appendRow(header)
-            for dst in sorted(by_cat[cat]):
-                missing = {e for r in self.routes[dst] for e in r.missing_engines}
-                lab = label(dst)
-                text = f"{dst.upper()}" + (f"   {lab}" if lab.upper() != dst.upper() else "")
-                if missing:
-                    text += "   · needs " + ", ".join(engines.ENGINES[k].name for k in missing)
-                item = QStandardItem(text)
-                item.setData(dst, Qt.UserRole)
-                model.appendRow(item)
-        self.combo.setModel(model)
+    def fill_picker(self) -> None:
         has_any = bool(self.routes)
-        self.combo.setEnabled(has_any)
+        self.picker.setEnabled(has_any)
         self.convert_btn.setEnabled(has_any)
         if not has_any:
-            self.combo.clear()
-            self.combo.addItem("No conversions for this file")
+            self.picker.clear("No conversions for this file")
             return
-        rows = {model.item(i).data(Qt.UserRole): i for i in range(model.rowCount())}
-        rows.pop(None, None)
-        self.combo.setCurrentIndex(rows.get(self.preselect(), min(rows.values())))
+        own = category(self.fmts[0])
+        kind_order = {c: i for i, c in enumerate(sorted(CATEGORIES, key=lambda c: c != own))}  # own kind first
+        options = []
+        for dst in sorted(self.routes, key=lambda d: (kind_order.get(category(d), 99), d)):
+            name = label(dst)
+            needs = list(dict.fromkeys(engines.ENGINES[e].name for r in self.routes[dst] for e in r.missing_engines))
+            options.append(Option(dst, category(dst), "" if name.upper() == dst.upper() else name, needs))
+        remembered = self.settings.value(f"last/{self.fmts[0]}", "")
+        common = suggest(self.fmts[0], self.routes)
+        suggested = [f for f in dict.fromkeys([remembered, common]) if f in self.routes]
+        self.picker.set_options(options, self.preselect() or options[0].fmt, suggested)
 
     def preselect(self) -> str | None:
         """What this user last turned this kind of file into, else what most people do with it."""
@@ -376,7 +665,7 @@ class Window(QWidget):
     # ------------------------------------------------ running
 
     def start_convert(self) -> None:
-        target = self.combo.currentData(Qt.UserRole)
+        target = self.picker.current()
         if not target:
             return
         self.settings.setValue(f"last/{self.fmts[0]}", target)
@@ -406,7 +695,7 @@ class Window(QWidget):
 
     def run_job(self, job: Job) -> None:
         self.job = job
-        for w in (self.combo, self.convert_btn, self.extract_btn):
+        for w in (self.picker, self.convert_btn, self.extract_btn):
             w.setEnabled(False)
         self.show_btn.hide()
         self.bar.setRange(0, 0)
@@ -423,7 +712,7 @@ class Window(QWidget):
         self.bar.hide()
         if self.files:
             self.routes = registry.common_targets(self.fmts)  # engines may have changed
-            self.fill_combo()
+            self.fill_picker()
             self.extract_btn.setEnabled(True)
         if errors:
             more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
