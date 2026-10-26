@@ -13,6 +13,7 @@ Newest first. Each entry is dated by when it landed.
 - **Changed:** meshport and packport are pinned to their `v0.2.0` tags, and the libraries ConvertAll imports directly (Beautiful Soup, NumPy, backports.zstd before Python 3.14) are listed as dependencies instead of arriving by chance through other packages.
 - **Changed:** the window starts a little faster: the download code for Ghostscript loads only when Ghostscript is being installed. Ghostscript downloads are also only accepted from Artifex's own GitHub releases.
 - **Added:** GitHub Actions run the tests and `ruff check` on every push and pull request, plus `CONTRIBUTING.md` and `SECURITY.md`. The code passes ruff 0.16's default rules.
+- **Changed:** the README's two old screenshots are replaced by one of 1.1.0: a phone video dropped on the window, with 87 formats to pick from.
 
 ## 2026-10-26: Extract from the right-click menu, every archive type, and 62 more formats (1.1.0)
 

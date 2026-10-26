@@ -3,8 +3,7 @@
 Convert, compress or extract any file. Drop it in, pick a format, done.
 
 <p align="center">
-  <img src="screenshots/preview.png" alt="ConvertAll turning a comic book (.cbr) into a PDF" width="420">
-  <img src="screenshots/formats_preview.png" alt="Choosing an output format: search, suggestions and formats grouped by kind" width="420">
+  <img src="screenshots/convertall.png" alt="ConvertAll with a phone video dropped on it: the format picker offers 87 formats, MP4 suggested" width="840">
 </p>
 
 What's new: see the [changelog](CHANGELOG.md).
