@@ -1,12 +1,17 @@
-"""External conversion engines: find them, run them, install them with winget."""
+"""External conversion engines: find them, run them, install them with winget (or, for the one
+engine winget doesn't carry, download its official release)."""
 
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable
 
@@ -20,9 +25,14 @@ class Engine:
     key: str
     name: str
     exe: str
-    winget_id: str
+    winget_id: str  # "" when winget doesn't have it (see DOWNLOADERS)
     size: str
     paths: tuple[str, ...] = ()
+    hidden: bool = False  # used when present, never offered (paid software)
+
+
+# Engines ConvertAll unpacks into its own folder: per user, no installer, no admin prompt
+ENGINE_HOME = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ConvertAll", "engines")
 
 
 ENGINES: dict[str, Engine] = {e.key: e for e in [
@@ -49,6 +59,22 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
     Engine("blender", "Blender", "blender", "BlenderFoundation.Blender", "~400 MB", (
         r"%ProgramFiles%\Blender Foundation\Blender*\blender.exe",
     )),
+    Engine("pandoc", "Pandoc", "pandoc", "JohnMacFarlane.Pandoc", "~200 MB", (
+        r"%LOCALAPPDATA%\Pandoc\pandoc.exe",
+        r"%ProgramFiles%\Pandoc\pandoc.exe",
+    )),
+    Engine("djvulibre", "DjVuLibre", "ddjvu", "DjVuLibre.DjView", "~30 MB", (
+        r"%ProgramFiles(x86)%\DjVuLibre\ddjvu.exe",
+        r"%ProgramFiles%\DjVuLibre\ddjvu.exe",
+    )),
+    Engine("ghostscript", "Ghostscript", "gswin64c", "", "~65 MB", (
+        os.path.join(ENGINE_HOME, "ghostscript", "bin", "gswin64c.exe"),
+        r"%ProgramFiles%\gs\gs*\bin\gswin64c.exe",
+    )),
+    Engine("winrar", "WinRAR", "rar", "", "", (
+        r"%ProgramFiles%\WinRAR\Rar.exe",
+        r"%ProgramFiles(x86)%\WinRAR\Rar.exe",
+    ), hidden=True),
 ]}
 
 _cache: dict[str, str | None] = {}
@@ -103,12 +129,73 @@ def refresh() -> None:
 
 
 def status() -> list[tuple[Engine, str | None]]:
-    return [(e, find(e.key)) for e in ENGINES.values()]
+    return [(e, find(e.key)) for e in ENGINES.values() if not e.hidden]
+
+
+def installable(key: str) -> bool:
+    return bool(ENGINES[key].winget_id) or key in DOWNLOADERS
+
+
+# ---- Ghostscript: Artifex publishes it on GitHub, not winget
+
+GS_RELEASES = "https://api.github.com/repos/ArtifexSoftware/ghostpdl-downloads/releases/latest"
+GS_KNOWN = ("https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10080/gs10080w64.exe",
+            "52a91b8bf09298788d7a57b9206127026c23eacd75405f0a131e26dc381dce50")
+
+
+def _latest_ghostscript() -> tuple[str, str]:
+    """(url, sha256) of the newest 64-bit Windows build; the known-good one if GitHub can't say."""
+    try:
+        with urllib.request.urlopen(GS_RELEASES, timeout=20) as r:
+            release = json.load(r)
+        asset = next(a for a in release["assets"] if a["name"].endswith("w64.exe"))
+        algo, digest = asset["digest"].split(":", 1)
+        if algo == "sha256":
+            return asset["browser_download_url"], digest
+    except Exception:
+        pass
+    return GS_KNOWN
+
+
+def _download_ghostscript(log: Callable[[str], None] | None) -> None:
+    """Download the official release, check its SHA-256, and unpack only its programs (bin:
+    gswin64c.exe and the DLL, which has fonts and startup files built in)."""
+    url, sha256 = _latest_ghostscript()
+    if not available("7zip"):
+        install("7zip", log)
+    with tempfile.TemporaryDirectory(prefix="convertall-gs-") as tmp:
+        setup = os.path.join(tmp, "gs.exe")
+        if log:
+            log(f"Downloading {url.rsplit('/', 1)[-1]}")
+        h = hashlib.sha256()
+        with urllib.request.urlopen(url, timeout=60) as r, open(setup, "wb") as f:
+            while chunk := r.read(1 << 20):
+                h.update(chunk)
+                f.write(chunk)
+        if h.hexdigest() != sha256:
+            raise ConversionError("The Ghostscript download didn't match its published checksum")
+        dest = os.path.join(ENGINE_HOME, "ghostscript")
+        shutil.rmtree(dest, ignore_errors=True)
+        run([require("7zip"), "x", "-y", "-bd", f"-o{dest}", setup, "bin"])
+
+
+DOWNLOADERS: dict[str, Callable[[Callable[[str], None] | None], None]] = {
+    "ghostscript": _download_ghostscript,
+}
 
 
 def install(key: str, log: Callable[[str], None] | None = None) -> bool:
     """Install an engine with winget. Returns True if it's usable afterwards."""
     eng = ENGINES[key]
+    if key in DOWNLOADERS:
+        try:
+            DOWNLOADERS[key](log)
+        except OSError as exc:
+            raise ConversionError(f"Couldn't download {eng.name}: {exc}") from exc
+        refresh()
+        return available(key)
+    if not eng.winget_id:
+        raise ConversionError(f"{eng.name} can't be installed from ConvertAll")
     if not shutil.which("winget"):
         raise ConversionError("winget isn't available; install App Installer from the Microsoft Store")
     cmd = ["winget", "install", "-e", "--id", eng.winget_id, "--silent",

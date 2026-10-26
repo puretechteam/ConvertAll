@@ -28,6 +28,7 @@ AUDIO_ARGS = {
     "caf": ["-c:a", "alac"],
     "mp2": ["-c:a", "mp2", "-b:a", "256k", "-ar", "44100"],  # MP2 has no 8 kHz mode (phone audio)
     "au": ["-c:a", "pcm_s16be"],
+    "m4r": ["-c:a", "aac", "-b:a", "192k", "-t", "40", "-f", "ipod"],  # iPhone ringtones stop at 40 s
 }
 
 VIDEO_ARGS = {
@@ -41,11 +42,11 @@ VIDEO_ARGS = {
     "webm": ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1", "-pix_fmt", "yuv420p",
              "-c:a", "libopus", "-b:a", "128k"],
     "avi": ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "libmp3lame", "-q:a", "3"],
-    "wmv": ["-c:v", "wmv2", "-b:v", "4M", "-c:a", "wmav2", "-b:a", "192k"],
+    "wmv": ["-c:v", "wmv2", "-b:v", "4M", *EVEN, "-c:a", "wmav2", "-b:a", "192k"],
     "mpg": ["-c:v", "mpeg2video", "-q:v", "3", "-c:a", "mp2", "-b:a", "192k"],
-    "ogv": ["-c:v", "libtheora", "-q:v", "7", "-c:a", "libvorbis", "-q:a", "5"],
+    "ogv": ["-c:v", "libtheora", "-q:v", "7", "-pix_fmt", "yuv420p", *EVEN, "-c:a", "libvorbis", "-q:a", "5"],
     "f4v": [*H264, *AAC],
-    "asf": ["-c:v", "wmv2", "-b:v", "4M", "-c:a", "wmav2", "-b:a", "192k"],
+    "asf": ["-c:v", "wmv2", "-b:v", "4M", *EVEN, "-c:a", "wmav2", "-b:a", "192k"],
     "vob": ["-c:v", "mpeg2video", "-q:v", "3", *EVEN, "-c:a", "ac3", "-b:a", "192k"],
 }
 
@@ -57,8 +58,8 @@ WEBP_ARGS = ["-vf", "fps=15,scale='min(800,iw)':-1:flags=lanczos", "-c:v", "libw
 AUDIO = set(AUDIO_ARGS)
 VIDEO = set(VIDEO_ARGS)
 # FFmpeg reads these fine but can't (usefully) write them
-AUDIO_IN = AUDIO | {"ape"}
-VIDEO_IN = VIDEO | {"mxf", "rm", "rmvb"}
+AUDIO_IN = AUDIO | {"ape", "dsf", "dff"}
+VIDEO_IN = VIDEO | {"mxf", "rm", "rmvb", "3g2"}
 
 
 def ffmpeg(src: Path, dst: Path, args: list[str]) -> None:

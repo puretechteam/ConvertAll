@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "convertall"
-version = "1.0.0"
+version = "1.1.0"
 description = "Convert, compress or extract any file."
 readme = "README.md"
 license = "MIT"
@@ -35,6 +35,13 @@ dependencies = [
     "pydicom>=3.0",
     "pyjpegls>=1.2",
     "meshport @ git+https://github.com/puretechteam/meshport",
+    "packport @ git+https://github.com/puretechteam/packport",
+    "vtracer>=0.6",
+    "pysubs2>=1.7",
+    "pycdlib>=1.14",
+    "lz4>=4",
+    "brotli>=1.1",
+    "olefile>=0.46",
 ]
 
 [project.optional-dependencies]

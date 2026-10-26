@@ -97,9 +97,15 @@ def test_cbr_to_cbz(samples, tmp_path):
         assert "Issue 1/page10.png" in z.namelist()
 
 
-def test_cbr_can_not_be_created():
-    with pytest.raises(registry.NoRouteError):
-        registry.find_route("cbz", "cbr")
+def test_cbr_is_created_as_stored_rar(samples, tmp_path, without_engine):
+    import packport
+    without_engine("winrar")  # packport, not WinRAR
+    out = convert(samples("cbz"), "cbr", out_dir=tmp_path)
+    assert out.read_bytes().startswith(b"Rar!\x1a\x07\x00")  # RAR 4, which every comic reader opens
+    names = {m.name for m in packport.read_rar(out)}
+    assert {"Issue 1/page1.jpg", "Issue 1/page10.png", "ComicInfo.xml"} <= names
+    with pymupdf.open(convert(out, "pdf", out_dir=tmp_path / "pdf")) as doc:
+        assert doc.page_count == 4
 
 
 def test_folder_of_images_to_pdf(samples, tmp_path):

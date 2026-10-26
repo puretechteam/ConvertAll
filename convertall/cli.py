@@ -35,9 +35,9 @@ def _ask_install(keys: list[str], assume_yes: bool) -> bool:
         eng = engines.ENGINES[key]
         if not assume_yes:
             if not sys.stdin.isatty():
-                print(f"{eng.name} is required. Re-run with -y to install it via winget.", file=sys.stderr)
+                print(f"{eng.name} is required. Re-run with -y to install it.", file=sys.stderr)
                 return False
-            answer = input(f"{eng.name} ({eng.size}) is needed for this. Install it with winget? [y/N] ")
+            answer = input(f"{eng.name} ({eng.size}) is needed for this. Install it now? [y/N] ")
             if answer.strip().lower() not in ("y", "yes"):
                 return False
         print(f"Installing {eng.name}...")
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv and argv[0] == "engines":
         p = argparse.ArgumentParser(prog="convertall engines", description="Show or install conversion engines")
-        p.add_argument("--install", metavar="KEY", help=f"one of: {', '.join(engines.ENGINES)}")
+        p.add_argument("--install", metavar="KEY", help=f"one of: {', '.join(e.key for e, _ in engines.status())}")
         return cmd_engines(p.parse_args(argv[1:]))
 
     p = argparse.ArgumentParser(prog="convertall", description="Convert, compress or extract any file.",

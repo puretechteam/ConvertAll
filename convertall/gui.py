@@ -24,10 +24,11 @@ from . import __version__, engines, pipeline, registry
 from .converters.archives import NATIVE_EXTRACT
 from .detect import detect
 from .errors import ConversionError
-from .formats import CATEGORIES, category, describe, label, suggest
+from .formats import ALIASES, CATEGORIES, category, describe, label, suggest
 
 ASSETS = Path(__file__).resolve().parent / "assets"  # PyInstaller places them here too
 SERVER_NAME = f"ConvertAll-{getpass.getuser()}"
+EXTRACT_SETTLE_MS = 1000  # right-click Extract on several archives: wait for all their processes
 
 LIGHT = dict(bg="#f7f7f8", surface="#ffffff", text="#18181b", muted="#71717a", border="#d4d4d8",
              accent="#6366f1", accent_text="#ffffff", accent_soft="#eef2ff", error="#dc2626", ok="#16a34a")
@@ -501,7 +502,7 @@ class EnginesDialog(QDialog):
         self.setMinimumWidth(380)
         lay = QVBoxLayout(self)
         intro = QLabel("ConvertAll uses these free tools for some formats. "
-                       "Missing ones are installed with winget when you first need them.")
+                       "Missing ones are installed for you when you first need them.")
         intro.setWordWrap(True)
         intro.setObjectName("muted")
         lay.addWidget(intro)
@@ -543,6 +544,11 @@ class Window(QWidget):
         self.outputs: list[Path] = []
         self.job: Job | None = None
         self.last_add = 0.0
+        self.pending_extract: list[Path] = []
+        self.extract_timer = QTimer(self)
+        self.extract_timer.setSingleShot(True)
+        self.extract_timer.setInterval(EXTRACT_SETTLE_MS)
+        self.extract_timer.timeout.connect(self.extract_pending)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 16, 22, 20)
@@ -609,15 +615,33 @@ class Window(QWidget):
 
     # ------------------------------------------------ files and formats
 
-    def add_files_from_other_instance(self, paths: list[Path]) -> None:
+    def add_files_from_other_instance(self, paths: list[Path], extract: bool = False) -> None:
         """Explorer launches one process per selected file; gather them into one batch."""
         now = time.monotonic()
-        merged = self.files + paths if now - self.last_add < 2 and not self.job else paths
-        self.set_files(list(dict.fromkeys(merged)))
+        if extract:
+            # extract once the burst of processes has settled (each arrival restarts the wait)
+            self.pending_extract = list(dict.fromkeys(self.pending_extract + paths))
+            self.extract_timer.start()
+        else:
+            merged = self.files + paths if now - self.last_add < 2 and not self.job else paths
+            self.set_files(list(dict.fromkeys(merged)))
         self.last_add = now
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
         self.raise_()
         self.activateWindow()
+
+    def extract_pending(self) -> None:
+        if self.job or not self.pending_extract:
+            return  # job_done comes back for them
+        paths, self.pending_extract = self.pending_extract, []
+        self.set_files(paths)
+        if not self.files:
+            return
+        if all(pipeline.can_extract(f) for f in self.fmts):
+            self.start_extract()
+        else:
+            odd = next(p for p, f in zip(self.files, self.fmts) if not pipeline.can_extract(f))
+            self.set_status(f"{odd.name} isn't an archive ConvertAll can extract", "error")
 
     def set_files(self, paths: list[Path]) -> None:
         if self.job:
@@ -688,7 +712,7 @@ class Window(QWidget):
         box.setWindowTitle("One-time setup")
         box.setIcon(QMessageBox.Question)
         box.setText(f"This conversion needs {names}.")
-        box.setInformativeText("It's free and installs once with winget. Install it now?")
+        box.setInformativeText("It's free and installs once, right from here. Install it now?")
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         box.button(QMessageBox.Yes).setText("Install")
         return box.exec() == QMessageBox.Yes
@@ -723,6 +747,8 @@ class Window(QWidget):
         else:
             self.set_status(f"Done · {len(outputs)} files", "ok")
         self.show_btn.setVisible(bool(outputs))
+        if self.pending_extract:  # more archives were right-clicked while this ran
+            self.extract_timer.start()
 
     def set_status(self, text: str, state: str = "") -> None:
         self.status.setText(text)
@@ -744,7 +770,8 @@ class Window(QWidget):
                 self.set_status("Removed from the right-click menu", "ok")
             else:
                 install_context_menu()
-                self.set_status("Added “Convert with ConvertAll” to the right-click menu "
+                self.set_status("Added “Convert with ConvertAll” to the right-click menu, and "
+                                "“Extract with ConvertAll” on archives "
                                 "(Windows 11: under Show more options)", "ok")
         except OSError as exc:
             self.set_status(f"Couldn't change the right-click menu: {exc}", "error")
@@ -752,21 +779,38 @@ class Window(QWidget):
     def about(self) -> None:
         QMessageBox.about(self, "ConvertAll", f"<b>ConvertAll {__version__}</b><br>"
                           "Convert, compress or extract any file.<br><br>"
-                          "Uses Pillow, PyMuPDF, py7zr, fontTools, trimesh, gmsh, ezdxf, pydicom and, "
-                          "when needed, FFmpeg, 7-Zip, LibreOffice, Calibre, ImageMagick and Blender.")
+                          "Uses Pillow, PyMuPDF, py7zr, fontTools, trimesh, gmsh, ezdxf, pydicom, meshport, "
+                          "packport, vtracer, pysubs2, pycdlib and, when needed, FFmpeg, 7-Zip, LibreOffice, "
+                          "Calibre, ImageMagick, Blender, Pandoc, DjVuLibre and Ghostscript.")
 
 
 # ---------------------------------------------------------------- Explorer right-click menu
+# "Convert with ConvertAll" on every file and folder. Archives get "Extract with ConvertAll"
+# instead: a verb under SystemFileAssociations\.<ext> with the same key name as the one under *
+# replaces it for that extension, so Explorer shows one entry, never both.
 
-_CTX_KEYS = (r"Software\Classes\*\shell\ConvertAll", r"Software\Classes\Directory\shell\ConvertAll")
+_STAR_KEY = r"Software\Classes\*\shell\ConvertAll"
+_DIR_KEY = r"Software\Classes\Directory\shell\ConvertAll"
+_SFA = r"Software\Classes\SystemFileAssociations"
+_VERB = r"shell\ConvertAll"
 
 
-def _launch_command() -> str:
+def extract_extensions() -> list[str]:
+    """Extensions right-click extracts. Comics and other kinds that happen to be archives keep
+    Convert: people turn a .cbz into a PDF far more often than they unpack it."""
+    from .converters.archives import EXTRACTABLE
+    fmts = {f for f in EXTRACTABLE if category(f) == "Archive"}
+    exts = {f.rsplit(".", 1)[-1] for f in fmts} | {a for a, f in ALIASES.items() if f in fmts}
+    return sorted(exts)
+
+
+def _launch_command(*flags: str) -> str:
+    args = "".join(f"{f} " for f in flags)
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" "%1"'
+        return f'"{sys.executable}" {args}"%1"'
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     exe = pythonw if pythonw.exists() else Path(sys.executable)
-    return f'"{exe}" -m convertall --gui "%1"'
+    return f'"{exe}" -m convertall --gui {args}"%1"'
 
 
 def _icon_path() -> str:
@@ -778,50 +822,112 @@ def context_menu_installed() -> bool:
         return False
     import winreg
     try:
-        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, _CTX_KEYS[0]))
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STAR_KEY))
         return True
     except OSError:
         return False
 
 
+def registered_version() -> str | None:
+    """The ConvertAll version that registered the right-click menu (None before 1.1)."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STAR_KEY) as k:
+            return winreg.QueryValueEx(k, "Version")[0]
+    except OSError:
+        return None
+
+
+def _version_tuple(v: str | None) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in (v or "0").split("."))
+    except ValueError:
+        return (0,)
+
+
+def context_menu_outdated() -> bool:
+    return context_menu_installed() and _version_tuple(registered_version()) < _version_tuple(__version__)
+
+
+def _set_verb(key: str, text: str, command: str) -> None:
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+        winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, text)
+        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, _icon_path())
+        winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key + r"\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, command)
+
+
 def install_context_menu() -> None:
     import winreg
-    for key in _CTX_KEYS:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
-            winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, "Convert with ConvertAll")
-            winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, _icon_path())
-            winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key + r"\command") as k:
-            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, _launch_command())
+    remove_context_menu()  # also drops extensions an older build registered
+    for key in (_STAR_KEY, _DIR_KEY):
+        _set_verb(key, "Convert with ConvertAll", _launch_command())
+    for ext in extract_extensions():
+        _set_verb(rf"{_SFA}\.{ext}\{_VERB}", "Extract with ConvertAll", _launch_command("--extract"))
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STAR_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, "Version", 0, winreg.REG_SZ, __version__)
+
+
+def _delete(key: str, only_if_empty: bool = False) -> None:
+    import winreg
+    try:
+        if only_if_empty:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                subkeys, values, _ = winreg.QueryInfoKey(k)
+            if subkeys or values:
+                return
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+    except FileNotFoundError:
+        pass
 
 
 def remove_context_menu() -> None:
     import winreg
-    for key in _CTX_KEYS:
-        for sub in (key + r"\command", key):
-            try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
-            except FileNotFoundError:
-                pass
+    for key in (_STAR_KEY, _DIR_KEY):
+        _delete(key + r"\command")
+        _delete(key)
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _SFA) as k:
+            exts = [winreg.EnumKey(k, i) for i in range(winreg.QueryInfoKey(k)[0])]
+    except FileNotFoundError:
+        exts = []
+    for ext in exts:
+        base = rf"{_SFA}\{ext}"
+        _delete(rf"{base}\{_VERB}\command")
+        _delete(rf"{base}\{_VERB}")
+        _delete(rf"{base}\shell", only_if_empty=True)  # leave other apps' entries alone
+        _delete(base, only_if_empty=True)
 
 
 # ---------------------------------------------------------------- entry point
 
-def _forward_to_running(files: list[str]) -> bool:
+EXTRACT_MARKER = "--extract"  # first line of a forwarded message: extract these, don't convert
+
+
+def _forward_to_running(files: list[str], extract: bool = False) -> bool:
     """If ConvertAll is already open, hand it our files and let it handle them."""
     sock = QLocalSocket()
     sock.connectToServer(SERVER_NAME)
     if not sock.waitForConnected(300):
         return False
-    sock.write("\n".join(files).encode("utf-8"))
+    sock.write("\n".join([EXTRACT_MARKER] * extract + files).encode("utf-8"))
     sock.waitForBytesWritten(1000)
     sock.disconnectFromServer()
     return True
 
 
+def parse_message(data: str) -> tuple[list[Path], bool]:
+    lines = [ln for ln in data.splitlines() if ln.strip()]
+    extract = bool(lines) and lines[0] == EXTRACT_MARKER
+    return [Path(p) for p in lines[extract:]], extract
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = [a for a in (sys.argv[1:] if argv is None else argv) if a != "--gui"]
-    files = [str(Path(a).resolve()) for a in argv]
+    extract = EXTRACT_MARKER in argv
+    files = [str(Path(a).resolve()) for a in argv if a != EXTRACT_MARKER]
     app = QApplication(sys.argv[:1])
     app.setApplicationName("ConvertAll")
     app.setStyle("Fusion")
@@ -832,9 +938,18 @@ def main(argv: list[str] | None = None) -> int:
     lock = QLockFile(str(Path(tempfile.gettempdir()) / f"{SERVER_NAME}.lock"))
     if not lock.tryLock(0):
         for _ in range(40):
-            if _forward_to_running(files):
+            if _forward_to_running(files, extract):
                 return 0
             time.sleep(0.1)
+
+    # An update brings new right-click entries; refresh a menu an older build registered.
+    # Only the installed app does this, so running from source never repoints the menu.
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        try:
+            if context_menu_outdated():
+                install_context_menu()
+        except OSError:
+            pass
 
     apply_theme(app)
     app.styleHints().colorSchemeChanged.connect(lambda _: apply_theme(app))
@@ -848,10 +963,9 @@ def main(argv: list[str] | None = None) -> int:
         conn = server.nextPendingConnection()
 
         def read():
-            data = bytes(conn.readAll()).decode("utf-8")
-            paths = [Path(p) for p in data.splitlines() if p.strip()]
+            paths, extract_them = parse_message(bytes(conn.readAll()).decode("utf-8"))
             if paths:
-                win.add_files_from_other_instance(paths)
+                win.add_files_from_other_instance(paths, extract_them)
             else:
                 win.raise_()
                 win.activateWindow()
@@ -861,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
 
     win.show()
     if files:
-        QTimer.singleShot(0, lambda: win.add_files_from_other_instance([Path(f) for f in files]))
+        QTimer.singleShot(0, lambda: win.add_files_from_other_instance([Path(f) for f in files], extract))
     code = app.exec()
     lock.unlock()
     return code

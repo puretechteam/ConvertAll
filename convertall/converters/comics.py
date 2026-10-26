@@ -14,7 +14,7 @@ from .images import READ as PIL_READ, enable_heif, prepare
 from .pdf import PDF_DPI
 
 PAGE_EXT = {f".{e}" for e in PIL_READ} | {".jpeg", ".jpe", ".jfif", ".tif", ".heif"}
-WRITABLE = COMICS - {"cbr"}
+WRITABLE = COMICS  # CBR too: stored RAR via packport (or WinRAR when installed)
 
 
 def _natural(p: Path) -> list:

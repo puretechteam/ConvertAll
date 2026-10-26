@@ -12,7 +12,7 @@ from .formats import MULTI_EXT
 from .registry import Route, find_route
 
 # Single-stream compressors keep the original name: notes.txt -> notes.txt.gz
-STREAM_COMPRESSORS = {"gz", "bz2", "xz"}
+STREAM_COMPRESSORS = {"gz", "bz2", "xz", "zst", "lz4", "br", "lzma", "z"}
 
 
 def unique_path(path: Path) -> Path:
@@ -36,7 +36,7 @@ def unique_path(path: Path) -> Path:
 
 def step_name(cur: Path, base: str, dst_fmt: str) -> str:
     if dst_fmt in STREAM_COMPRESSORS:
-        return f"{cur.name}.{dst_fmt}"
+        return f"{cur.name}.{'Z' if dst_fmt == 'z' else dst_fmt}"  # Unix compress is always .Z
     return f"{base}.{dst_fmt}"
 
 

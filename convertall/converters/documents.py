@@ -8,9 +8,9 @@ from .. import engines
 from ..errors import ConversionError
 from ..registry import converter
 
-WRITER_IN = {"doc", "docx", "odt", "rtf", "wpd", "pages", "txt", "docm", "dotx", "dot", "wps"}
+WRITER_IN = {"doc", "docx", "odt", "rtf", "wpd", "pages", "txt", "docm", "dotx", "dot", "wps", "hwp"}
 WRITER_OUT = {"pdf", "docx", "doc", "odt", "rtf", "txt"}
-CALC_IN = {"xls", "xlsx", "ods", "numbers", "csv", "xlsm", "xlsb", "xltx"}
+CALC_IN = {"xls", "xlsx", "ods", "numbers", "csv", "xlsm", "xlsb", "xltx", "dbf"}
 CALC_OUT = {"pdf", "xlsx", "xls", "ods", "csv"}
 IMPRESS_IN = {"ppt", "pptx", "odp", "key", "pptm", "ppsx", "pps", "potx"}
 IMPRESS_OUT = {"pdf", "pptx", "ppt", "odp"}

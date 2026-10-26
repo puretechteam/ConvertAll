@@ -159,3 +159,95 @@ def test_no_conversions_disables_the_picker(window, tmp_path):
     window.set_files([odd])
     if not window.routes:
         assert not window.picker.isEnabled() and window.picker.current() is None
+
+
+# ---- right-click "Extract with ConvertAll"
+
+
+def test_forwarded_message_carries_the_extract_marker(tmp_path):
+    a, b = tmp_path / "a.zip", tmp_path / "b.rar"
+    assert gui.parse_message(f"{gui.EXTRACT_MARKER}\n{a}\n{b}\n") == ([a, b], True)
+    assert gui.parse_message(f"{a}\n") == ([a], False)
+
+
+def _run_now(win):
+    """Jobs run on this thread so the test can wait for them."""
+    win.run_job = lambda job: (setattr(win, "job", job), job.done.connect(win.job_done), job.run())
+
+
+def test_right_clicked_archives_extract_as_one_batch(window, samples, tmp_path):
+    from convertall.converters import archives
+    zips = []
+    for name in ("first", "second"):
+        z = tmp_path / f"{name}.zip"
+        archives.compress(samples("folder"), z, "zip")
+        zips.append(z)
+    _run_now(window)
+    for z in zips:  # Explorer starts one process per file; each forwards its file
+        window.add_files_from_other_instance([z], extract=True)
+    assert window.extract_timer.isActive() and window.pending_extract == zips
+    window.extract_timer.stop()
+    window.extract_pending()
+    assert len(window.outputs) == 2 and all(o.is_dir() for o in window.outputs)
+    assert window.status.text() == "Done · 2 files"
+
+
+def test_archives_arriving_mid_extraction_wait_their_turn(window, samples, tmp_path):
+    window.job = object()  # something is running
+    window.add_files_from_other_instance([samples("zip")], extract=True)
+    window.extract_timer.stop()
+    window.extract_pending()
+    assert window.pending_extract  # kept for later
+    window.job = None
+    _run_now(window)
+    window.job_done([], [])
+    assert window.extract_timer.isActive()
+
+
+def test_extract_refuses_what_isnt_an_archive(window, samples):
+    window.add_files_from_other_instance([samples("png")], extract=True)
+    window.extract_timer.stop()
+    window.extract_pending()
+    assert window.status.property("state") == "error" and "isn't an archive" in window.status.text()
+
+
+def test_extract_menu_covers_archives_but_not_comics():
+    exts = gui.extract_extensions()
+    assert {"zip", "rar", "7z", "gz", "tgz", "iso", "jar", "001"} <= set(exts)
+    assert not {"cbz", "cbr", "txt", "docx", "chm", "lit"} & set(exts)
+
+
+@pytest.mark.skipif(not gui.sys.platform.startswith("win"), reason="Windows registry")
+def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
+    import winreg
+    root = r"Software\ConvertAll-test"
+    monkeypatch.setattr(gui, "_STAR_KEY", rf"{root}\*\shell\ConvertAll")
+    monkeypatch.setattr(gui, "_DIR_KEY", rf"{root}\Directory\shell\ConvertAll")
+    monkeypatch.setattr(gui, "_SFA", rf"{root}\SystemFileAssociations")
+    monkeypatch.setattr(gui, "extract_extensions", lambda: ["zip", "rar"])
+
+    def value(key, name=""):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            return winreg.QueryValueEx(k, name)[0]
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.zip\shell\Other"):
+            pass  # another app's verb on .zip: must survive our removal
+        gui.install_context_menu()
+        assert value(gui._STAR_KEY, "MUIVerb") == "Convert with ConvertAll"
+        assert value(gui._STAR_KEY, "Version") == gui.__version__
+        zip_verb = rf"{root}\SystemFileAssociations\.zip\shell\ConvertAll"
+        assert value(zip_verb, "MUIVerb") == "Extract with ConvertAll"
+        assert "--extract" in value(zip_verb + r"\command")
+        assert not gui.context_menu_outdated()
+        monkeypatch.setattr(gui, "__version__", "99.0.0")
+        assert gui.context_menu_outdated()
+        gui.remove_context_menu()
+        assert not gui.context_menu_installed()
+        with pytest.raises(OSError):
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, zip_verb))
+        with pytest.raises(OSError):  # emptied keys we created are gone
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.rar"))
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.zip\shell\Other"))
+    finally:
+        import subprocess
+        subprocess.run(["reg", "delete", rf"HKCU\{root}", "/f"], capture_output=True)

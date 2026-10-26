@@ -1,4 +1,5 @@
-"""Subtitles: SRT <-> WebVTT built in; ASS/SSA and pulling subtitle tracks out of videos via FFmpeg."""
+"""Subtitles: SRT <-> WebVTT built in; ASS/SSA, MicroDVD and TTML via pysubs2, with our own YouTube
+SBV and SAMI writers; subtitle tracks pulled out of videos via FFmpeg."""
 
 import re
 from pathlib import Path
@@ -9,6 +10,11 @@ from .media import VIDEO_IN, ffmpeg
 
 TEXT_SUBS = {"srt", "vtt"}
 STYLED_SUBS = {"ass", "ssa"}
+OTHER_SUBS = {"sbv", "sub", "ttml", "smi"}
+ALL_SUBS = TEXT_SUBS | STYLED_SUBS | OTHER_SUBS
+PYSUBS2 = {"srt": "srt", "vtt": "vtt", "ass": "ass", "ssa": "ssa", "sub": "microdvd", "ttml": "ttml",
+           "smi": "sami"}
+MICRODVD_FPS = 23.976  # .sub counts frames; files that don't say their frame rate are usually film
 
 _TIMING = re.compile(r"(?P<a>[\d:.,]+)\s*-->\s*(?P<b>[\d:.,]+)")
 _VTT_TAG = re.compile(r"</?(?:c|v|lang|ruby|rt)(?:[.\s][^>]*)?>|<\d[\d:.]*>")  # keeps <i> <b> <u>
@@ -56,10 +62,76 @@ def srt_vtt(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     dst.write_text(head + "\n\n".join(out) + "\n", encoding="utf-8")
 
 
-@converter(inputs=TEXT_SUBS | STYLED_SUBS, outputs=STYLED_SUBS, engine="ffmpeg")
-@converter(inputs=STYLED_SUBS, outputs=TEXT_SUBS, engine="ffmpeg")
-def ffmpeg_subs(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    ffmpeg(src, dst, [])
+# ---- YouTube's .sbv: "0:00:01.000,0:00:02.500", then the text; blocks split by blank lines
+
+def _sbv_time(t: str) -> int:
+    h, m, sec = t.strip().split(":")
+    return round((int(h) * 3600 + int(m) * 60 + float(sec)) * 1000)
+
+
+def _read_sbv(src: Path):
+    import pysubs2
+    subs = pysubs2.SSAFile()
+    for block in _blocks(src.read_text(encoding="utf-8-sig", errors="replace")):
+        try:
+            a, b = block[0].split(",")
+            start, end = _sbv_time(a), _sbv_time(b)
+        except ValueError:
+            continue
+        subs.append(pysubs2.SSAEvent(start=start, end=end, text="\\N".join(block[1:])))
+    return subs
+
+
+def _write_sbv(subs, dst: Path) -> None:
+    def stamp(ms: int) -> str:
+        return f"{ms // 3600000}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}"
+    blocks = [f"{stamp(e.start)},{stamp(e.end)}\n{e.plaintext}" for e in subs if not e.is_comment]
+    dst.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+
+
+def _write_sami(subs, dst: Path) -> None:
+    """Microsoft SAMI (.smi): each line shown at its <SYNC Start>, cleared by an empty one at its end."""
+    import html
+    out = ["<SAMI>", "<HEAD>", "<TITLE></TITLE>", '<STYLE TYPE="text/css"><!--',
+           "P { margin-left: 8pt; margin-right: 8pt; text-align: center; font-family: sans-serif; }",
+           ".ENCC { Name: English; lang: en-US; }", "--></STYLE>", "</HEAD>", "<BODY>"]
+    events = sorted((e for e in subs if not e.is_comment), key=lambda e: e.start)
+    for i, e in enumerate(events):
+        out.append(f"<SYNC Start={e.start}><P Class=ENCC>" + "<br>".join(html.escape(s) for s in e.plaintext.split("\n")))
+        if i + 1 == len(events) or events[i + 1].start > e.end:
+            out.append(f"<SYNC Start={e.end}><P Class=ENCC>&nbsp;")
+    out += ["</BODY>", "</SAMI>"]
+    dst.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _load(src: Path, fmt: str):
+    import pysubs2
+    if fmt == "sbv":
+        return _read_sbv(src)
+    if fmt == "sub" and b"\x00" in src.read_bytes()[:16]:
+        raise ConversionError("This .sub holds DVD subtitle pictures (VobSub), not text")
+    try:
+        try:
+            return pysubs2.load(str(src), encoding="utf-8-sig", format_=PYSUBS2[fmt])
+        except pysubs2.exceptions.UnknownFPSError:  # MicroDVD without a frame-rate line
+            return pysubs2.load(str(src), encoding="utf-8-sig", format_=PYSUBS2[fmt], fps=MICRODVD_FPS)
+        except UnicodeDecodeError:  # older subtitle files are often in the local code page
+            return pysubs2.load(str(src), encoding="cp1252", format_=PYSUBS2[fmt], fps=MICRODVD_FPS)
+    except pysubs2.exceptions.Pysubs2Error as exc:
+        raise ConversionError(f"Couldn't read these subtitles: {exc}") from None
+
+
+@converter(inputs=ALL_SUBS, outputs=STYLED_SUBS | OTHER_SUBS)
+@converter(inputs=STYLED_SUBS | OTHER_SUBS, outputs=TEXT_SUBS)
+def pysubs2_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
+    subs = _load(src, src_fmt)
+    if not [e for e in subs if not e.is_comment]:
+        raise ConversionError("No subtitles found in this file")
+    if dst_fmt == "sbv":
+        return _write_sbv(subs, dst)
+    if dst_fmt == "smi":  # pysubs2 reads SAMI but doesn't write it
+        return _write_sami(subs, dst)
+    subs.save(str(dst), encoding="utf-8", format_=PYSUBS2[dst_fmt], fps=MICRODVD_FPS)
 
 
 @converter(inputs=VIDEO_IN | {"mka"}, outputs=TEXT_SUBS | STYLED_SUBS, engine="ffmpeg")

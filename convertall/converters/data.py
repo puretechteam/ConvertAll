@@ -15,8 +15,7 @@ from ..errors import ConversionError
 from ..registry import converter
 
 TREE = {"json", "jsonl", "yaml", "toml", "xml", "ini", "plist"}
-TABLE = {"csv", "tsv", "xlsx"}
-READ_ONLY = {"sqlite"}
+TABLE = {"csv", "tsv", "xlsx", "sqlite"}
 
 
 # ---- XML <-> dict (attributes as "@name", text as "#text") ----
@@ -273,11 +272,41 @@ def dump(data, path: Path, fmt: str) -> None:
             for r in recs:
                 ws.append([r.get(k) for k in fields])
         wb.save(path)
+    elif fmt == "sqlite":
+        _dump_sqlite(data, path)
     else:
         raise ConversionError(f"Can't write {fmt}")
 
 
-@converter(inputs=TREE | TABLE | READ_ONLY, outputs=TREE | TABLE)
+def _sql_type(values) -> str:
+    kinds = {type(v) for v in values if v is not None}
+    if kinds and kinds <= {int, bool}:
+        return "INTEGER"
+    if kinds and kinds <= {int, float, bool}:
+        return "REAL"
+    return "TEXT"
+
+
+def _dump_sqlite(data, path: Path) -> None:
+    """One table per list of records (a single list becomes the table "data")."""
+    multi = isinstance(data, dict) and data and all(isinstance(v, list) for v in data.values())
+    tables = data if multi else {"data": data}
+    con = sqlite3.connect(path)
+    try:
+        for name, rows in tables.items():
+            recs = _records(rows)
+            cols = list(dict.fromkeys(k for r in recs for k in r)) or ["value"]
+            quote = lambda s: '"{}"'.format(str(s).replace('"', '""'))  # noqa: E731
+            defs = ", ".join(f"{quote(c)} {_sql_type(r.get(c) for r in recs)}" for c in cols)
+            con.execute(f"CREATE TABLE {quote(name)} ({defs})")
+            con.executemany(f"INSERT INTO {quote(name)} VALUES ({', '.join('?' * len(cols))})",
+                            [[r.get(c) for c in cols] for r in recs])
+        con.commit()
+    finally:
+        con.close()
+
+
+@converter(inputs=TREE | TABLE, outputs=TREE | TABLE)
 def data_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     data = load(src, src_fmt)
     if src_fmt in ("csv", "tsv") and dst_fmt == "xlsx":

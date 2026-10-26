@@ -6,7 +6,7 @@ from .. import engines
 from ..detect import COMICS
 from ..registry import converter
 
-EBOOK_IN = {"epub", "mobi", "azw3", "azw", "fb2", "lit", "pdb", "lrf"}
+EBOOK_IN = {"epub", "mobi", "azw3", "azw", "fb2", "lit", "pdb", "lrf", "chm"}
 EBOOK_OUT = {"epub", "mobi", "azw3", "fb2", "pdf", "docx", "txt"}
 READER_OUT = {"epub", "mobi", "azw3"}
 

@@ -1,4 +1,4 @@
-"""3D models: mesh formats via trimesh, FBX via meshport (both built in); Blend/USD/Alembic via Blender."""
+"""3D models: mesh formats via trimesh, FBX and 3DS via meshport (both built in); Blend/USD/Alembic via Blender."""
 
 from pathlib import Path
 
@@ -86,10 +86,13 @@ def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     return dst
 
 
-# ---- FBX via meshport (pure Python): FBX <-> glTF, and on to everything else through GLB
+# ---- FBX and 3DS via meshport (pure Python): to and from glTF, and on to everything else through GLB
 
-@converter(inputs={"fbx"}, outputs={"glb", "gltf"})
-@converter(inputs={"glb", "gltf"}, outputs={"fbx"})
+MESHPORT = {"fbx", "3ds"}
+
+
+@converter(inputs=MESHPORT, outputs={"glb", "gltf"} | MESHPORT)
+@converter(inputs={"glb", "gltf"}, outputs=MESHPORT)
 def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:
@@ -99,7 +102,7 @@ def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     return dst
 
 
-@converter(inputs={"fbx"}, outputs={"obj"}, terminal=True)  # .obj + .mtl + textures: may be a folder
+@converter(inputs=MESHPORT, outputs={"obj"}, terminal=True)  # .obj + .mtl + textures: may be a folder
 def fbx_to_obj(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:

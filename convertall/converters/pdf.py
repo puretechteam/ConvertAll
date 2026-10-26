@@ -1,6 +1,7 @@
-"""PDF, XPS, SVG and light ebook handling via PyMuPDF (no external engine)."""
+"""PDF, XPS, SVG and light ebook handling via PyMuPDF; PostScript and EPS via Ghostscript."""
 
 import html
+import shutil
 from pathlib import Path
 
 from PIL import Image
@@ -9,17 +10,27 @@ from ..errors import ConversionError
 from ..registry import converter
 from .images import WRITE as RASTER_OUT, prepare, save_image
 
-RASTER_OUT = RASTER_OUT - {"pdf"}
+RASTER_OUT = RASTER_OUT - {"pdf", "eps"}  # PDF -> EPS stays vector (Ghostscript)
 PAGED = {"pdf", "xps", "oxps"}
 PDF_DPI = 150
+
+
+def open_doc(src: Path):
+    """PyMuPDF document for src; .svgz (gzipped SVG) is unpacked first."""
+    import gzip
+    import pymupdf
+    with src.open("rb") as f:
+        zipped = f.read(2) == b"\x1f\x8b"
+    if zipped:
+        return pymupdf.open(stream=gzip.decompress(src.read_bytes()), filetype="svg")
+    return pymupdf.open(src)
 
 
 @converter(inputs={"xps", "oxps"}, outputs={"pdf"})
 @converter(inputs={"svg"}, outputs={"pdf"}, terminal=True)  # picture-only PDFs: don't chain on
 @converter(inputs={"epub", "fb2", "mobi"}, outputs={"pdf"}, cost=2)
 def to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    import pymupdf
-    with pymupdf.open(src) as doc:
+    with open_doc(src) as doc:
         dst.write_bytes(doc.convert_to_pdf())
 
 
@@ -50,8 +61,7 @@ def _save_page(page, path: Path, fmt: str) -> None:
 @converter(inputs=PAGED, outputs=RASTER_OUT | {"svg"}, terminal=True)
 def pages_to_images(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     """One page -> one image file. Several pages -> a folder of page images."""
-    import pymupdf
-    with pymupdf.open(src) as doc:
+    with open_doc(src) as doc:
         if doc.page_count == 1:
             _save_page(doc[0], dst, dst_fmt)
             return dst
@@ -65,8 +75,7 @@ def pages_to_images(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
 
 @converter(inputs={"svg"}, outputs=RASTER_OUT)
 def svg_to_image(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    import pymupdf
-    with pymupdf.open(src) as doc:
+    with open_doc(src) as doc:
         page = doc[0]
         longest = max(page.rect.width, page.rect.height) or 1
         zoom = max(1.0, 1024 / longest)  # small icons render crisp, big drawings stay native
@@ -75,8 +84,7 @@ def svg_to_image(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 
 @converter(inputs=PAGED | {"epub", "fb2", "mobi"}, outputs={"txt"}, terminal=True)
 def to_text(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    import pymupdf
-    with pymupdf.open(src) as doc:
+    with open_doc(src) as doc:
         dst.write_text("\n\n".join(page.get_text().strip() for page in doc), encoding="utf-8")
 
 
@@ -100,3 +108,27 @@ def html_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
         story.draw(device)
         writer.end_page()
     writer.close()
+
+
+# ---- PostScript and EPS via Ghostscript (Pillow writes raster EPS on its own, see images.py)
+
+GS_DEVICE = {"pdf": "pdfwrite", "ps": "ps2write", "eps": "eps2write"}
+
+
+@converter(inputs={"eps", "ps"}, outputs={"pdf"}, engine="ghostscript")
+@converter(inputs={"pdf"}, outputs={"ps", "eps"}, engine="ghostscript", terminal=True)
+def ghostscript_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
+    from .. import engines
+    # Ghostscript's argument parsing and non-ASCII paths don't mix: work on plain names
+    local, out = dst.parent / f"input.{src_fmt}", dst.parent / f"output.{dst_fmt}"
+    shutil.copyfile(src, local)
+    args = [engines.require("ghostscript"), "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE",
+            f"-sDEVICE={GS_DEVICE[dst_fmt]}"]
+    if src_fmt == "eps":
+        args.append("-dEPSCrop")  # the page is the drawing's bounding box, not a sheet of paper
+    if dst_fmt == "eps":
+        args += ["-dFirstPage=1", "-dLastPage=1"]  # EPS is one picture
+    engines.run([*args, f"-sOutputFile={out.name}", local.name], timeout=600, cwd=str(dst.parent))
+    if not out.exists() or not out.stat().st_size:
+        raise ConversionError("Ghostscript produced nothing; the file may be damaged")
+    out.replace(dst)

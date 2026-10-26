@@ -68,7 +68,7 @@ def test_multi_hop_route():
     ("png", "mp3"),    # no cross-media nonsense
     ("png", "docx"),   # an image PDF doesn't chain into Word
     ("json", "png"),   # too many category hops
-    ("ttf", "otf"),    # outline conversion isn't supported
+    ("png", "dxf"),    # a picture has no vector shapes to cut
     ("mp3", "mp4"),
     ("folder", "gz"),  # gz holds a single file
 ])

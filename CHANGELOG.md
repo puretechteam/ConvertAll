@@ -2,6 +2,39 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## 2026-10-26: Extract from the right-click menu, every archive type, and 62 more formats (1.1.0)
+
+ConvertAll now reads 245 formats (was 183) and writes 150 (was 116).
+
+- **Added: "Extract with ConvertAll"** in Explorer's right-click menu on archives. It unpacks straight away, with progress, then "Saved …" and *Show in folder*. Select several archives and they're extracted as one batch. Other files and folders still get "Convert with ConvertAll". An existing right-click menu updates itself the first time the new version opens.
+- **Added: RAR and CBR output**, written by [packport](https://github.com/puretechteam/packport), a new pure-Python library (the way meshport replaced Blender for FBX). They're RAR 4 *stored* archives, which every reader opens, including old comic apps. If WinRAR is installed, ConvertAll uses it instead for real compression. packport also writes Unix `.Z` and CPIO.
+- **Added: every common archive and compression type.**
+  - New outputs: rar, tar.lz4, lz4, br (Brotli), lzma, z, cpio, iso (with Joliet and Rock Ridge, so long and non-English names survive) and wim.
+  - New inputs: disk images (vmdk, vdi, qcow2, img, squashfs, udf, apfs, hfs), macOS installers (xar, pkg), Windows patches (msp), Unix ar, zipx, and split archives (.001, .r00).
+  - Zip-based packages each show under their own name and extract like a zip: jar, war, ear, apk, aab, ipa, xpi, crx, vsix, nupkg, whl, appx and msix.
+- **Added: new formats.**
+  - **Images:** any picture → **SVG**, traced into real vector shapes; PSD, CUR, XPM and EPS outputs; EPS and PostScript inputs; gzipped SVG (.svgz).
+  - **Audio and video:** M4R iPhone ringtones; DSD audio (dsf, dff) and 3G2 inputs.
+  - **Subtitles:** YouTube SBV, MicroDVD SUB, TTML/DFXP and SAMI. ASS/SSA no longer need FFmpeg.
+  - **Documents:**
+    - LaTeX, reStructuredText, Org, AsciiDoc and MediaWiki ↔ Markdown, HTML, Word, OpenDocument and EPUB, through Pandoc;
+    - DjVu → PDF and text, through DjVuLibre;
+    - Hangul (HWP) and dBASE (DBF) inputs;
+    - Jupyter notebooks → Markdown/HTML, including saved outputs and plots;
+    - saved web pages (MHT/MHTML) → HTML/PDF with their pictures inlined;
+    - CHM help files → EPUB/PDF/MOBI.
+  - **New kind, Email:** EML and Outlook MSG → PDF, HTML or text, with headers, inline pictures and the list of attachments.
+  - **New kind, Maps:** GPX, KML, KMZ and GeoJSON to each other, and → CSV.
+  - **Contacts and calendars:** vCard and iCalendar ↔ CSV/JSON (and on to Excel). Google and Outlook CSV exports are understood.
+  - **Fonts:** TTF ↔ OTF (TrueType and CFF outlines converted), and TTC collections split into their fonts.
+  - **3D:** 3DS read and write, through meshport 0.2.
+  - **CAD:** SVG and PDF vector drawings → DXF, for laser cutters.
+  - **Data:** SQLite as an output.
+- **Added: three engines, each installed from the window like the others:**
+  - **Pandoc** and **DjVuLibre**, both through winget;
+  - **Ghostscript**, which winget doesn't carry. ConvertAll downloads Artifex's official release, checks its published SHA-256 and unpacks it into its own folder. There's no installer to run and no admin prompt.
+- **Changed:** files with no extension are also recognised by their content for EPS/PS, DjVu, vCard, iCalendar, GPX, KML, TTML and the new archive types.
+
 ## 2026-10-26: A new way to choose the format
 
 - **Changed:** the long dropdown list of formats is replaced by a panel:

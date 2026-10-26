@@ -23,8 +23,20 @@ def expected_error(src: str, dst: str) -> str | None:
     """Conversions these samples can't do, and the error the user sees instead."""
     if category(dst) == "Subtitle" and category(src) in ("Video", "Audio") and src not in SUB_CODEC:
         return "has no subtitle track"  # only some sample videos carry one
-    if src in ("woff", "woff2") and dst == "otf":
-        return "TrueType outlines"  # the sample font is TrueType
+    if src == "djvu" and dst == "txt":
+        return "no text layer"  # the sample is a picture, never OCRed
+    if src == "djvu" and dst == "dxf":
+        return "No vector shapes"  # scanned pages, like any scanned PDF
+    return None
+
+
+def content_dependent(src: str, dst: str) -> str | None:
+    """Conversions that work only when the data has the right columns: these samples may or may
+    not, so either a result or this message is right."""
+    if dst == "vcf" and src != "vcf":
+        return "No contacts found"
+    if dst == "ics" and src != "ics":
+        return "No events found"
     return None
 
 
@@ -62,6 +74,22 @@ def check(path: Path, fmt: str) -> None:
             img.load()
     elif fmt == "svg":
         assert b"<svg" in data[:4000]
+    elif fmt in ("fbx", "3ds"):
+        import meshport
+        assert meshport.load(path, fmt).meshes
+    elif fmt in ("eps", "ps"):
+        assert data.startswith((b"%!PS", b"\xc5\xd0\xd3\xc6")), data[:20]
+    elif fmt == "dxf":
+        import ezdxf
+        assert len(ezdxf.readfile(path).modelspace()) > 0
+    elif cat == "Map":
+        from convertall.converters import maps
+        m = maps.read_map(path, fmt)
+        assert m.points or m.lines
+    elif fmt in ("vcf", "ics"):
+        from convertall.converters import contacts
+        text = data.decode("utf-8")
+        assert (contacts.read_vcards if fmt == "vcf" else contacts.read_events)(text)
     elif fmt == "pdf":
         import pymupdf
         with pymupdf.open(path) as doc:
@@ -75,7 +103,10 @@ def check(path: Path, fmt: str) -> None:
             assert want in kinds, f"{path.name} has no {want} stream ({kinds})"
     elif cat == "Subtitle":
         text = data.decode("utf-8", "replace")
-        assert ("-->" in text) if fmt in ("srt", "vtt") else ("Dialogue:" in text), text[:200]
+        if fmt in ("srt", "vtt"):
+            assert "-->" in text, text[:200]
+        elif fmt in ("ass", "ssa"):
+            assert "Dialogue:" in text, text[:200]
         assert "Second line" in text
     elif fmt in ("docx", "xlsx", "pptx", "odt", "ods", "odp", "odg", "epub", "3mf"):
         with zipfile.ZipFile(path) as z:
@@ -89,7 +120,7 @@ def check(path: Path, fmt: str) -> None:
     elif cat == "Data" or fmt in ("csv", "tsv"):
         from convertall.converters import data as data_mod
         assert data_mod.load(path, fmt) is not None
-    elif fmt in ("txt", "md", "html"):
+    elif fmt in ("txt", "md", "html") or cat == "Markup":
         assert data.decode("utf-8").strip()
     elif cat == "Font":
         from fontTools.ttLib import TTFont
@@ -147,5 +178,11 @@ def test_convert(pair, samples, tmp_path):
         with pytest.raises(ConversionError, match=err):
             pipeline.convert(src, dst_fmt, out_dir=tmp_path)
         return
-    out = pipeline.convert(src, dst_fmt, out_dir=tmp_path)
+    maybe = content_dependent(src_fmt, dst_fmt)
+    try:
+        out = pipeline.convert(src, dst_fmt, out_dir=tmp_path)
+    except ConversionError as exc:
+        if maybe and maybe in str(exc):
+            return
+        raise
     check(out, dst_fmt)

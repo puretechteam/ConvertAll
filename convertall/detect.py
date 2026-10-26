@@ -49,14 +49,38 @@ def _comic_kind(path: Path) -> str | None:
     return "cbt" if head[257:262] == b"ustar" else None
 
 
+# Signatures puremagic doesn't know (or confuses), checked first
+_SIGNATURES = (
+    (b"\xc5\xd0\xd3\xc6", "eps"), (b"AT&TFORM", "djvu"), (b"\x04\x22\x4d\x18", "lz4"), (b"\x1f\x9d", "z"),
+    (b"070701", "cpio"), (b"070702", "cpio"), (b"070707", "cpio"), (b"xar!", "xar"), (b"KDMV", "vmdk"),
+    (b"QFI\xfb", "qcow2"), (b"conectix", "vhd"), (b"vhdxfile", "vhdx"), (b"ITSF", "chm"),
+    (b"<<< Oracle VM VirtualBox Disk Image >>>", "vdi"), (b"!<arch>\n", "ar"),
+)
+# Text formats recognised by what they start with (after any BOM and blank space)
+_TEXT_STARTS = ((b"BEGIN:VCARD", "vcf"), (b"BEGIN:VCALENDAR", "ics"), (b"WEBVTT", "vtt"))
+
+
 def _sniff(path: Path) -> str | None:
     try:
         with path.open("rb") as f:
-            head = f.read(132)
+            head = f.read(512)
         if head[128:132] == b"DICM":  # DICOM files often have no extension at all
             return "dcm"
         if head.startswith(b"SQLite format 3\x00"):  # .db files are often SQLite
             return "sqlite"
+        if head.startswith(b"%!PS"):
+            return "eps" if b"EPSF" in head.split(b"\n", 1)[0] else "ps"
+        for magic, fmt in _SIGNATURES:
+            if head.startswith(magic):
+                return fmt
+        text = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+        for start, fmt in _TEXT_STARTS:
+            if text.upper().startswith(start):
+                return fmt
+        if text.startswith(b"<?xml") or text.startswith(b"<"):
+            for tag, fmt in ((b"<gpx", "gpx"), (b"<kml", "kml"), (b"<tt ", "ttml"), (b"<tt>", "ttml")):
+                if tag in head:
+                    return fmt
     except OSError:
         return None
     try:
