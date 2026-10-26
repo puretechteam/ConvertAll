@@ -11,9 +11,9 @@ What's new: see the [changelog](CHANGELOG.md).
 
 ## Just want the app?
 
-Download the repo (**Code → Download ZIP**), unzip it, and run **`app\ConvertAll.exe`**. Nothing to install.
+Download **`ConvertAll-<version>-windows.zip`** from the [latest release](https://github.com/puretechteam/ConvertAll/releases/latest), unzip it, and run **`ConvertAll\ConvertAll.exe`**. Nothing to install.
 
-The `app` folder is all you need. You can delete everything else (the source code, tests and packaging files are only for developers) and move `app` wherever you like. Keep `ConvertAll.exe` and its `_internal` folder together: the exe won't start without it.
+Move the `ConvertAll` folder wherever you like. Keep `ConvertAll.exe` and its `_internal` folder together: the exe won't start without it.
 
 ## Using it
 
@@ -84,7 +84,8 @@ python -m venv .venv
 .venv\Scripts\python -m convertall              # window
 .venv\Scripts\python -m pytest                  # tests (engine tests skip if the engine is missing)
 .venv\Scripts\python -m pytest tests\test_e2e.py --e2e   # every format -> every target it can reach (slow)
-.venv\Scripts\pyinstaller --noconfirm ConvertAll.spec   # -> dist\ConvertAll\ (copy it over app\ to update the shipped app)
+.venv\Scripts\ruff check .                      # lint
+.venv\Scripts\python packaging\release.py       # build dist\ConvertAll\ and zip it for a GitHub release
 python packaging\make_icon.py                   # regenerate the icon
 ```
 

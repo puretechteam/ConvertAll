@@ -4,3 +4,5 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+app/
+.ruff_cache/
