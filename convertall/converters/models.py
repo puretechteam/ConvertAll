@@ -37,6 +37,25 @@ def _side_files_aware(export, dst: Path) -> Path:
     return folder
 
 
+def _geometry_only(scene):
+    """All parts merged into one mesh in world space, leaving out colors and textures.
+    trimesh's own merge also combines every part's textures, which takes seconds on scenes
+    with hundreds of textured parts, for formats (STL) that would throw them away anyway."""
+    import numpy as np
+    import trimesh
+    verts, faces, offset = [], [], 0
+    for node in scene.graph.nodes_geometry:
+        matrix, name = scene.graph[node]
+        g = scene.geometry[name]
+        if not hasattr(g, "faces") or not len(g.faces):
+            continue
+        f = g.faces if np.linalg.det(matrix[:3, :3]) >= 0 else g.faces[:, ::-1]  # mirrored: keep faces outward
+        verts.append(trimesh.transform_points(g.vertices, matrix))
+        faces.append(f + offset)
+        offset += len(g.vertices)
+    return trimesh.Trimesh(np.concatenate(verts), np.concatenate(faces), process=False)
+
+
 @converter(inputs=MESH, outputs=MESH - {"obj"})
 @converter(inputs=MESH, outputs={"obj"}, terminal=True)  # may be a folder; chain via GLB instead
 def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
@@ -46,7 +65,10 @@ def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
         files = trimesh.exchange.gltf.export_gltf(scene, embed_buffers=True)
         dst.write_bytes(next(v for k, v in files.items() if k.endswith(".gltf")))
         return dst
-    target = scene if dst_fmt in SCENE_EXPORT else scene.to_mesh()
+    if dst_fmt == "stl":
+        target = _geometry_only(scene)
+    else:
+        target = scene if dst_fmt in SCENE_EXPORT else scene.to_mesh()
     if dst_fmt == "obj":
         return _side_files_aware(lambda p: target.export(str(p)), dst)
     # Export to memory and write it ourselves: some exporters (pycollada) leave the file
@@ -67,6 +89,16 @@ def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     except meshport.MeshportError as e:
         raise ConversionError(str(e)) from None
     return dst
+
+
+@converter(inputs={"fbx"}, outputs={"obj"}, terminal=True)  # .obj + .mtl + textures: may be a folder
+def fbx_to_obj(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
+    import meshport
+    try:
+        scene = meshport.load(src, src_fmt)
+        return _side_files_aware(lambda p: meshport.save(scene, p), dst)
+    except meshport.MeshportError as e:
+        raise ConversionError(str(e)) from None
 
 
 # ---- Blender, for formats nothing lightweight reads or writes reliably
