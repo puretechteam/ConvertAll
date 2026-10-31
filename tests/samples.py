@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 
 from convertall import engines
 from convertall.converters import archives, documents, images, media
+from convertall.errors import ConversionError
 
 TEXT = "ConvertAll sample text"
 
@@ -750,6 +751,11 @@ class Samples:
             return p
         calc = {"xls": "xls:MS Excel 97", "ods": "ods", "xlsm": "xlsm:Calc MS Excel 2007 VBA XML", "dbf": "dbf:dBase",
                 "xltx": "xltx:Calc MS Excel 2007 XML Template", "xlsb": "xlsb:Calc MS Excel 2007 Binary"}
+        if fmt == "xlsb":
+            try:
+                return _soffice(self("xlsx"), p, calc[fmt])
+            except ConversionError:
+                return None  # LibreOffice reads XLSB but can't write it: 25.2 saves nothing, 26.2 fails
         if fmt in calc:
             return _soffice(self("xlsx"), p, calc[fmt])
         if fmt in ("csv", "tsv"):
