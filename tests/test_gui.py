@@ -419,7 +419,10 @@ def test_chip_tooltip_says_route_and_losses(window, samples):
     popup = _open(window, samples, "png")
     assert "transparency" in _chip(popup, "jpg").toolTip()
     assert "parts" not in _chip(popup, "webp").toolTip()
-    popup.close()
+
+
+@needs("libreoffice")  # the Word sample is made by LibreOffice
+def test_chip_tooltip_names_the_route_through_pdf(window, samples):
     window.set_files([samples("docx")])
     window.picker.click()
     tip = _chip(window.picker.popup, "png").toolTip()
