@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, engines, options, pipeline, registry
+from . import __version__, cancel, engines, options, pipeline, registry
 from .assurance import Report, show
 from .detect import detect
 from .errors import ConversionError
@@ -258,7 +258,8 @@ def reveal(path: Path) -> None:
 # ---------------------------------------------------------------- background jobs
 
 class Job(QThread):
-    """Installs any missing engines, then converts (or extracts) each file."""
+    """Installs any missing engines, then converts (or extracts) each file. cancel() stops it:
+    the engine running is killed, the file it was on is left unwritten, the rest are skipped."""
     progress = Signal(str)
     done = Signal(list, list, list, list)  # outputs, errors, notes, reports (assurance.Report)
 
@@ -266,13 +267,27 @@ class Job(QThread):
         super().__init__()
         self.files, self.target, self.install = files, target, install
         self.settings = settings or {}
+        self.token = cancel.Token()
+
+    def cancel(self) -> None:
+        self.token.cancel()
+
+    @property
+    def cancelled(self) -> bool:
+        return self.token.cancelled
 
     def run(self) -> None:
+        with cancel.using(self.token):
+            self._run()
+
+    def _run(self) -> None:
         outputs: list[Path] = []
         errors: list[str] = []
         notes: list[str] = []
         reports: list[Report] = []
         for key in self.install:
+            if self.cancelled:  # an install is never cut short; the next one just doesn't start
+                break
             name = engines.ENGINES[key].name
             self.progress.emit(f"Installing {name}… (this can take a few minutes)")
             try:
@@ -280,10 +295,12 @@ class Job(QThread):
                     errors.append(f"Couldn't install {name}")
             except Exception as exc:  # noqa: BLE001 - the window must always hear back
                 errors.append(str(exc) if isinstance(exc, ConversionError) else f"Couldn't install {name}: {exc}")
-        if errors:
+        if errors or self.cancelled:
             self.done.emit(outputs, errors, notes, reports)
             return
         for i, f in enumerate(self.files, 1):
+            if self.cancelled:
+                break
             count = f" {i} of {len(self.files)}" if len(self.files) > 1 else ""
             self.progress.emit(f"{'Extracting' if self.target is None else 'Converting'}{count} · {f.name}")
             try:
@@ -297,6 +314,8 @@ class Job(QThread):
                     found = [report.summary()] if report.summary() else []
                 outputs.append(out)
                 notes += [f"{f.name}: {n}" for n in found]
+            except cancel.Cancelled:
+                break
             except (ConversionError, OSError) as exc:
                 errors.append(f"{f.name}: {exc}")
             except Exception as exc:  # noqa: BLE001 - a surprise must not leave the window spinning forever
@@ -1595,6 +1614,7 @@ class Window(QWidget):
         self.routes: dict[str, list[registry.Route]] = {}
         self.outputs: list[Path] = []
         self.job: Job | None = None
+        self.close_when_done = False  # closed while converting: it closes once the job has stopped
         self.last_add = 0.0
         self.pending_extract: list[Path] = []
         self.extract_timer = QTimer(self)
@@ -1652,7 +1672,7 @@ class Window(QWidget):
         self.convert_btn.setObjectName("primary")
         self.convert_btn.setEnabled(False)
         self.convert_btn.setFixedSize(108, CONTROL)
-        self.convert_btn.clicked.connect(self.start_convert)
+        self.convert_btn.clicked.connect(self.convert_clicked)
         row.addWidget(self.convert_btn)
         root.addLayout(row)
 
@@ -1856,6 +1876,47 @@ class Window(QWidget):
 
     # ------------------------------------------------ running
 
+    def convert_clicked(self) -> None:
+        """While a job runs, the Convert button is its Cancel button."""
+        if isinstance(self.job, Job):
+            self.cancel_job()
+        else:
+            self.start_convert()
+
+    def cancel_job(self) -> None:
+        if not isinstance(self.job, Job) or self.job.cancelled:
+            return
+        self.job.cancel()
+        self.convert_btn.setEnabled(False)
+        self.convert_btn.setText("Stopping…")
+        self.set_status("Stopping…")
+
+    def confirm_stop(self) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("ConvertAll")
+        box.setIcon(QMessageBox.Question)
+        box.setText("Stop converting and close?")
+        box.setInformativeText("The file being converted now isn't saved; the ones already done are kept.")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        box.button(QMessageBox.Yes).setText("Stop and close")
+        box.button(QMessageBox.Cancel).setText("Keep converting")
+        return box.exec() == QMessageBox.Yes
+
+    def closeEvent(self, event) -> None:
+        """Closing mid-job asks first, then stops the job and closes once it has: Qt would
+        otherwise tear the window down under a running thread and leave its engine running."""
+        job = self.job
+        if isinstance(job, Job) and job.isRunning():
+            if not self.close_when_done and not self.confirm_stop():
+                event.ignore()
+                return
+            self.close_when_done = True
+            self.cancel_job()
+            self.hide()
+            event.ignore()  # job_done closes it for real
+            return
+        super().closeEvent(event)
+
     def start_convert(self) -> None:
         if self.notes_timer.isActive():
             self.refresh_notes()
@@ -1891,8 +1952,10 @@ class Window(QWidget):
 
     def run_job(self, job: Job) -> None:
         self.job = job
-        for w in (self.picker, self.convert_btn, self.extract_btn, self.options_panel):
+        for w in (self.picker, self.extract_btn, self.options_panel):
             w.setEnabled(False)
+        self.convert_btn.setText("Cancel")
+        self.convert_btn.setEnabled(True)
         self.show_btn.hide()
         self.details_btn.hide()
         self.bar.setRange(0, 0)
@@ -1904,7 +1967,18 @@ class Window(QWidget):
     def job_done(self, outputs: list[Path], errors: list[str], notes: list[str] | None = None,
                  reports: list[Report] | None = None) -> None:
         extracting = self.job is not None and self.job.target is None
+        stopped = isinstance(self.job, Job) and self.job.cancelled
         self.job = None
+        self.convert_btn.setText("Convert")
+        if self.close_when_done:
+            # hidden while it stopped, so closing it isn't "the last window closed": quit unless
+            # a 3D viewer is still open
+            self.close()
+            app = QApplication.instance()
+            if app and app.quitOnLastWindowClosed() and not any(
+                    w.isVisible() for w in app.topLevelWidgets() if w.isWindow() and w is not self):
+                app.quit()
+            return
         self.outputs = outputs
         self.reports = reports or []
         self.options_panel.setEnabled(True)
@@ -1917,7 +1991,11 @@ class Window(QWidget):
             self.extract_btn.setEnabled(True)
         self.show_btn.setVisible(bool(outputs))
         self.details_btn.setVisible(bool(self.reports))
-        if errors:
+        if stopped:
+            left = len(self.files) - len(outputs)
+            self.set_status("Stopped", "warn",
+                            f"{len(outputs)} saved, {left} not converted" if outputs else "Nothing was saved")
+        elif errors:
             more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
             first, _, why = errors[0].partition(": ")
             if first in {f.name for f in self.files}:  # "name: why" from one file
@@ -2271,6 +2349,9 @@ def run(files: list[str], mode: str, lock) -> int:
         else:  # load the converters while the window waits for a file, not before it shows
             QTimer.singleShot(150, registry._ensure_loaded)
     code = app.exec()
+    if isinstance(win.job, Job) and win.job.isRunning():  # quit some other way mid-job: stop it first
+        win.job.cancel()
+        win.job.wait()
     lock.unlock()
     return code
 

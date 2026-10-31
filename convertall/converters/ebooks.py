@@ -6,7 +6,7 @@ from pathlib import Path
 from ..detect import COMICS
 from ..errors import ConversionError
 from ..losses import loss
-from ..registry import converter, note, option
+from ..registry import converter, note, option, take
 from .archives import extract_to
 
 BOOKS = {"epub", "mobi", "azw3", "azw", "fb2", "fbz", "lit", "pdb", "lrf", "chm", "htmlz", "txtz",
@@ -42,6 +42,9 @@ def _read(src: Path, src_fmt: str | None):
     """The book, read as the format the route planned (a .epub that is really a MOBI was found out
     already), or as what bookport finds when src_fmt is None (a folder of pages)."""
     import bookport
+    kept = take(src, src_fmt, "book")  # the check read it already
+    if kept is not None:
+        return kept
     try:
         return bookport.read(src, src_fmt)
     except bookport.DRMError as exc:

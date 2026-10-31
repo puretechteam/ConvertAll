@@ -3,7 +3,8 @@
 from pathlib import Path
 
 from ..errors import ConversionError
-from ..registry import converter
+from ..registry import converter, take
+from ..textfile import read_text
 
 MESH = {"stl", "obj", "ply", "off", "glb", "gltf", "3mf", "dae"}
 SCENE_EXPORT = {"glb", "gltf", "3mf", "stl", "obj", "ply"}  # these keep (or merge) parts themselves
@@ -25,7 +26,7 @@ def _deforms(src: Path, src_fmt: str | None) -> bool:
                     return False
                 doc = json.loads(f.read(struct.unpack_from("<I", head, 12)[0]))
         else:
-            doc = json.loads(src.read_text(encoding="utf-8-sig"))
+            doc = json.loads(read_text(src))
     except (OSError, ValueError, struct.error):
         return False
     return bool(doc.get("skins")) or any(p.get("targets") for m in doc.get("meshes", [])
@@ -44,12 +45,12 @@ def _load(src: Path, src_fmt: str | None = None, dst_fmt: str | None = None):
         with tempfile.TemporaryDirectory(prefix="convertall-bent-", ignore_cleanup_errors=True) as tmp:
             bent = Path(tmp) / "bent.glb"
             try:
-                meshport.save(meshport.load(src).deformed(), bent)
+                meshport.save(take(src, src_fmt, "bent scene") or meshport.load(src).deformed(), bent)
             except meshport.MeshportError as e:
                 raise ConversionError(str(e)) from None
             scene = trimesh.load_scene(str(bent))
     else:
-        scene = trimesh.load_scene(str(src))
+        scene = take(src, src_fmt, "trimesh scene") or trimesh.load_scene(str(src))
         if (src_fmt or src.suffix.lstrip(".").lower()) == "obj" and len(scene.geometry) == 1:
             scene = _obj_parts(src, scene)
     if not scene.geometry:
@@ -170,7 +171,7 @@ MESHPORT_IN = MESHPORT | {"usd", "blend"}  # .blend is read only; .usd output ma
 def meshport_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:
-        meshport.save(meshport.load(src, src_fmt), dst, dst_fmt)
+        meshport.save(take(src, src_fmt, "scene") or meshport.load(src, src_fmt), dst, dst_fmt)
     except meshport.MeshportError as e:
         raise ConversionError(str(e)) from None
     return dst
@@ -183,7 +184,7 @@ def meshport_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
 def meshport_to_files(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:
-        scene = meshport.load(src, src_fmt)
+        scene = take(src, src_fmt, "scene") or meshport.load(src, src_fmt)
         return _side_files_aware(lambda p: meshport.save(scene, p), dst)
     except meshport.MeshportError as e:
         raise ConversionError(str(e)) from None

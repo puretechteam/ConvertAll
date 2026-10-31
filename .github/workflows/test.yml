@@ -6,7 +6,8 @@ on:
 
 jobs:
   test:
-    # ConvertAll is a Windows app (registry, winget, Explorer menu); tests for missing engines skip
+    # ConvertAll is a Windows app (registry, winget, Explorer menu). The engines most conversions
+    # need are installed so their tests run; LibreOffice, the big one, gets its own job below.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -14,8 +15,31 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      - name: Engines
+        run: choco install ffmpeg pandoc imagemagick ghostscript -y --no-progress
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
-      - run: python -m pytest -q
+      - run: python -m pytest -q -rs
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  office:
+    # The same suite with LibreOffice (~350 MB) too, for the office, drawing and metafile routes.
+    # The installer is cached between runs, so only the install itself takes time.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\choco-cache
+          key: choco-libreoffice-fresh-v1
+      - name: Engines
+        run: choco install libreoffice-fresh ffmpeg pandoc imagemagick ghostscript -y --no-progress --cache-location "${{ runner.temp }}\choco-cache"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q -rs
         env:
           QT_QPA_PLATFORM: offscreen

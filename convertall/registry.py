@@ -15,6 +15,7 @@ that keeps the most wins, even when it is a step longer.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 from collections import defaultdict
 from collections.abc import Callable, Iterable
@@ -151,6 +152,45 @@ def running(options: dict, found: list) -> tuple:
 def reset(tokens: tuple) -> None:
     _options.reset(tokens[0])
     _found.reset(tokens[1])
+
+
+# ---- what the check already read of the source (set by pipeline.convert): a book, a 3D scene or
+# a picture is parsed once and handed to the step that would read it again
+
+_parsed: contextvars.ContextVar[dict | None] = contextvars.ContextVar("parsed", default=None)
+
+
+@contextlib.contextmanager
+def sharing():
+    """Within it, keep() holds what was read of a file and take() hands it over once."""
+    token = _parsed.set({})
+    try:
+        yield
+    finally:
+        _parsed.reset(token)
+
+
+def _parse_key(path: Path, fmt: str | None, kind: str) -> tuple | None:
+    try:
+        st = path.stat()
+        return str(path.resolve()), st.st_mtime_ns, st.st_size, fmt, kind
+    except OSError:
+        return None
+
+
+def keep(path: Path, fmt: str | None, kind: str, value) -> None:
+    """Remember value as what reading path as fmt gave (kind: "book", "scene"...)."""
+    cache = _parsed.get()
+    key = _parse_key(Path(path), fmt, kind) if cache is not None else None
+    if key is not None:
+        cache[key] = value
+
+
+def take(path: Path, fmt: str | None, kind: str):
+    """What keep() held for path, or None; it is handed over, not shared: the taker may change it."""
+    cache = _parsed.get()
+    key = _parse_key(Path(path), fmt, kind) if cache else None
+    return cache.pop(key, None) if key is not None else None
 
 
 def _out_edges(fmt: str, hop: int) -> list[Edge]:

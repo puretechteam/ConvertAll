@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import assurance, registry
+from . import assurance, cancel, registry
 from .assurance import Report
 from .detect import detect, mislabelled, strip_ext
 from .errors import ConversionError, EngineMissingError
@@ -68,42 +68,46 @@ def convert(src: str | Path, dst_fmt: str, out_dir: str | Path | None = None,
     if relabel and src_fmt == dst_fmt:
         raise ConversionError(f"{src.name} is a {dst_fmt.upper()} already: only its name says "
                               f"{src.suffix.lower()} (rename it to keep it as it is)")
-    before = assurance.measure(src, src_fmt) if report is not None else None
-    held = assurance.features(before, src_fmt) if before is not None else None
-    route = planned = find_route(src_fmt, dst_fmt, options=options)
-    if held is not None:  # what this very file has can make another route keep more of it
-        route = find_route(src_fmt, dst_fmt, held, options)
-        if route.missing_engines and not planned.missing_engines:
-            route = planned
-    if route.missing_engines:
-        raise EngineMissingError(route.missing_engines)
-    out = Path(out_dir).resolve() if out_dir else src.parent
-    out.mkdir(parents=True, exist_ok=True)
-    base = strip_ext(src)
-    found: list[str] = []
+    # what the check reads of the source is handed to the step that reads it again (registry.keep)
+    with registry.sharing():
+        before = assurance.measure(src, src_fmt) if report is not None else None
+        held = assurance.features(before, src_fmt) if before is not None else None
+        route = planned = find_route(src_fmt, dst_fmt, options=options)
+        if held is not None:  # what this very file has can make another route keep more of it
+            route = find_route(src_fmt, dst_fmt, held, options)
+            if route.missing_engines and not planned.missing_engines:
+                route = planned
+        if route.missing_engines:
+            raise EngineMissingError(route.missing_engines)
+        out = Path(out_dir).resolve() if out_dir else src.parent
+        out.mkdir(parents=True, exist_ok=True)
+        base = strip_ext(src)
+        found: list[str] = []
 
-    # a library still holding a temp file open must not fail a conversion that already succeeded
-    with tempfile.TemporaryDirectory(prefix="convertall-", ignore_cleanup_errors=True) as tmp:
-        cur = src
-        tokens = registry.running(options, found)
-        try:
-            for i, edge in enumerate(route.edges):
-                step_dir = Path(tmp) / f"step{i}"
-                step_dir.mkdir()
-                target = step_dir / step_name(cur, base, edge.dst)
-                try:
-                    result = edge.func(cur, target, edge.src, edge.dst) or target
-                except ConversionError:
-                    raise
-                except Exception as exc:  # library errors -> readable message
-                    raise ConversionError(f"{edge.src.upper()} -> {edge.dst.upper()} failed: {exc}") from exc
-                if not Path(result).exists():
-                    raise ConversionError(f"{edge.src.upper()} -> {edge.dst.upper()} produced no output")
-                cur = Path(result)
-        finally:
-            registry.reset(tokens)
-        final = unique_path(out / cur.name)
-        shutil.move(str(cur), str(final))
+        # a library still holding a temp file open must not fail a conversion that already succeeded
+        with tempfile.TemporaryDirectory(prefix="convertall-", ignore_cleanup_errors=True) as tmp:
+            cur = src
+            tokens = registry.running(options, found)
+            try:
+                for i, edge in enumerate(route.edges):
+                    cancel.check()
+                    step_dir = Path(tmp) / f"step{i}"
+                    step_dir.mkdir()
+                    target = step_dir / step_name(cur, base, edge.dst)
+                    try:
+                        result = edge.func(cur, target, edge.src, edge.dst) or target
+                    except ConversionError:
+                        raise
+                    except Exception as exc:  # library errors -> readable message
+                        raise ConversionError(f"{edge.src.upper()} -> {edge.dst.upper()} failed: {exc}") from exc
+                    if not Path(result).exists():
+                        raise ConversionError(f"{edge.src.upper()} -> {edge.dst.upper()} produced no output")
+                    cur = Path(result)
+            finally:
+                registry.reset(tokens)
+            cancel.check()  # stopped during the last step: write nothing
+            final = unique_path(out / cur.name)
+            shutil.move(str(cur), str(final))
     if report is not None:
         _fill(report, src, src_fmt, relabel, route, held, options, found, before, final)
     return final
@@ -156,6 +160,7 @@ def extract(src: str | Path, out_dir: str | Path | None = None, src_fmt: str | N
             raise
         except Exception as exc:  # library errors on a damaged archive -> a readable message
             raise ConversionError(f"Couldn't extract {src.name}: {exc}") from exc
+        cancel.check()
         entries = list(tmp.iterdir())
         if len(entries) == 1:
             final = unique_path(out / entries[0].name)

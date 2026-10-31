@@ -15,7 +15,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import engines
+from . import engines, registry
 from .formats import category
 from .losses import FEATURES, Loss, typical
 
@@ -117,6 +117,8 @@ def _image(path: Path, fmt: str) -> dict:
             total = 0
             for i in range(frames):
                 img.seek(i)
+                if img.info.get("duration") is None:  # AVIF and WebP say it only once the frame is decoded
+                    img.load()
                 total += img.info.get("duration", 0) or 0
             facts["duration"] = round(total / 1000, 3)
             img.seek(0)
@@ -128,6 +130,8 @@ def _image(path: Path, fmt: str) -> dict:
             alpha = img.getchannel("A") if img.mode in ("RGBA", "LA", "La") else has and img.convert("RGBA").getchannel("A")
             facts["transparency"] = bool(has and alpha.getextrema()[0] < 255)
         img.load()
+    if frames == 1 and img.width * img.height <= PIXEL_LIMIT:  # decoded already: the conversion needn't again
+        registry.keep(path, fmt, "picture", img)
     return facts
 
 
@@ -175,6 +179,7 @@ def _meshport(path: Path, fmt: str) -> dict:
     import meshport
     import numpy as np
     scene = meshport.load(path, fmt)
+    registry.keep(path, fmt, "scene", scene)
     parts = triangles = 0
     rig = False
     for node, _ in scene.walk():
@@ -187,7 +192,10 @@ def _meshport(path: Path, fmt: str) -> dict:
     if not parts:
         raise Unreadable("it has no 3D geometry")
     facts = {"parts": parts, "triangles": triangles, "animation": bool(scene.animations), "rig": rig}
-    bounds = (scene.deformed() if rig else scene).bounds()  # a rig's size is where its skeleton holds it
+    bent = scene.deformed() if rig else scene
+    if rig:
+        registry.keep(path, fmt, "bent scene", bent)
+    bounds = bent.bounds()  # a rig's size is where its skeleton holds it
     if bounds is not None:
         facts["size"] = round(float(np.linalg.norm(np.subtract(bounds[1], bounds[0]))), 6)
     return facts
@@ -197,6 +205,7 @@ def _trimesh(path: Path, fmt: str) -> dict:
     import numpy as np
     import trimesh
     scene = trimesh.load_scene(str(path))
+    registry.keep(path, fmt, "trimesh scene", scene)
     nodes = scene.graph.nodes_geometry
     triangles = sum(len(getattr(scene.geometry[scene.graph[n][1]], "faces", ())) for n in nodes)
     if not triangles:
@@ -282,6 +291,7 @@ def _book(path: Path, fmt: str) -> dict:
         return {}  # protected: there's nothing to compare, and the conversion says why
     except bookport.BookportError as exc:
         raise Unreadable(str(exc)) from None
+    registry.keep(path, fmt, "book", book)
     return {"words": book.word_count()}
 
 

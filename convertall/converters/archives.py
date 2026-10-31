@@ -21,7 +21,7 @@ try:
 except ImportError:
     from backports import zstd
 
-from .. import engines
+from .. import cancel, engines
 from ..detect import COMICS, strip_ext
 from ..errors import ConversionError
 from ..formats import category
@@ -416,6 +416,7 @@ def _extract_tar(tf: tarfile.TarFile, dest: Path, budget: Budget, report: _Repor
     copies: list[tuple[Path, Path]] = []
 
     def pick(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+        cancel.check()
         original = placed.get(safe_name(member.linkname) or "") if member.islnk() else None
         if not (member.isreg() or member.isdir() or original):
             report.skipped += 1
@@ -451,6 +452,7 @@ def _extract_7z(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
             self.n = 0
 
         def write(self, s) -> int:
+            cancel.check()
             budget.take(len(s))  # py7zr itself stops each file at its declared size
             self.n += len(s)
             return self.f.write(s)

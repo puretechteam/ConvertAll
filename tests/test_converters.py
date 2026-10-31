@@ -273,3 +273,35 @@ def test_html_to_markdown(tmp_path):
                     "<p>A <a href='https://example.com'>link</a></p></body></html>", encoding="utf-8")
     md = convert(page, "md").read_text(encoding="utf-8")
     assert md.startswith("## Hi") and "[link](https://example.com)" in md and "x{}" not in md
+
+
+@needs("libreoffice")
+@needs("pandoc")
+@pytest.mark.parametrize("fmt", ["md", "org", "rst", "wiki", "adoc", "tex"])
+def test_pdf_to_markup_keeps_the_text(tmp_path, fmt):
+    """LibreOffice opens a PDF as positioned text boxes, which Pandoc's ODT reader skips: these
+    routes used to come out empty. The text of both pages must arrive."""
+    from convertall import Report
+
+    from .samples import Samples
+    report = Report()  # the window's way: the route is chosen with what this PDF holds
+    out = convert(Samples(tmp_path / "s")("pdf"), fmt, out_dir=tmp_path / "out", report=report)
+    text = out.read_text(encoding="utf-8")
+    assert "page 1" in text and "page 2" in text
+
+
+@needs("ffmpeg")
+@pytest.mark.parametrize("size", [(4, 4), (8, 40), (17, 12)])
+def test_tiny_pictures_make_an_ogv_that_plays(tmp_path, size):
+    """FFmpeg can't read back Theora under 18 pixels a side, so it wrote OGV files that no player
+    opened: small pictures are enlarged (keeping their shape) and the report says why."""
+    from convertall import Report, assurance
+    src = tmp_path / "tiny.png"
+    Image.new("RGB", size, (200, 30, 30)).save(src)
+    report = Report()
+    out = convert(src, "ogv", out_dir=tmp_path / "out", report=report)
+    facts = assurance.inspect(out, "ogv")  # raises when FFmpeg can't open the result
+    assert min(facts["width"], facts["height"]) >= 18
+    assert facts["width"] / facts["height"] == pytest.approx(size[0] / size[1], rel=0.15)
+    assert not report.warnings, report.lines()
+    assert any("18 pixels" in n for n in report.notes)

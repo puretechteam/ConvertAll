@@ -1,6 +1,7 @@
 """Raster images via Pillow (+ pillow-heif for HEIC), small writers for what Pillow can only read
 (PSD, CUR, XPM), and tracing pictures into SVG vectors (vtracer)."""
 
+import contextlib
 import functools
 import importlib.util
 import io
@@ -13,7 +14,7 @@ from PIL import Image, ImageOps, ImageSequence
 
 from ..errors import ConversionError
 from ..losses import MAJOR, loss
-from ..registry import converter, option
+from ..registry import converter, option, take
 
 PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP", "tiff": "TIFF",
@@ -204,7 +205,8 @@ def image_options(src: str, dst: str) -> tuple[str, ...]:
 def pillow_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     if src_fmt == "heic":
         enable_heif()
-    with Image.open(src) as img:
+    kept = take(src, src_fmt, "picture")  # decoded by the check already (one frame, not too big)
+    with contextlib.nullcontext(kept) if kept is not None else Image.open(src) as img:
         # a Photoshop file's "frames" are its layers: the picture is the flattened whole
         n = 1 if src_fmt == "psd" else getattr(img, "n_frames", 1)
         if n > 1 and dst_fmt in ANIMATED:

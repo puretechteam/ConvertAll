@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .. import engines
+from .. import cancel, engines
 from ..errors import ConversionError
 from ..losses import loss
 from ..registry import converter
@@ -42,23 +42,32 @@ def _profile() -> Path:
     return base
 
 
+LOCK_WAIT_S = 900  # longer than one conversion may take (600 s): past it, the other one is stuck
+
+
 @contextmanager
-def _one_at_a_time(profile: Path):
+def _one_at_a_time(profile: Path, limit: float = LOCK_WAIT_S):
     """One LibreOffice per profile: a second one started on it while the first runs fails (1),
-    so conversions in other ConvertAll processes wait for a lock beside the profile."""
+    so conversions in other ConvertAll processes wait for a lock beside the profile. The wait
+    stops when the conversion is cancelled, and after limit seconds."""
+    deadline = time.monotonic() + limit
     with open(profile.parent / "libreoffice-profile.lock", "a+b") as f:
-        if os.name == "nt":
-            import msvcrt
-            while True:
-                try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
                     f.seek(0)
                     msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.1)
-        else:
-            import fcntl
-            fcntl.flock(f, fcntl.LOCK_EX)
+                else:
+                    import fcntl
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                cancel.check()
+                if time.monotonic() > deadline:
+                    raise ConversionError("LibreOffice is still busy with another conversion; "
+                                          "try again when it has finished") from None
+                time.sleep(0.1)
         try:
             yield
         finally:
@@ -105,7 +114,14 @@ def html_to_writer(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     soffice_convert(src, dst, dst_fmt, infilter="HTML (StarWriter)")  # Writer, not Writer/Web
 
 
-@converter(inputs={"pdf"}, outputs={"docx", "odt"}, engine="libreoffice", cost=2, first_only=True,
-           notes=lambda s, d, o: [loss("The PDF is rebuilt as editable text: the layout may shift", weight=0)])
+_PDF_REBUILT = [loss("The PDF is rebuilt as editable text: the layout may shift", weight=0)]
+
+
+# LibreOffice opens a PDF as positioned text boxes. Pandoc reads those from DOCX but skips them in
+# ODT, so an ODT made from a PDF is an end result: routes onward (to Markdown, LaTeX...) take DOCX.
+@converter(inputs={"pdf"}, outputs={"docx"}, engine="libreoffice", cost=2, first_only=True,
+           notes=lambda s, d, o: _PDF_REBUILT)
+@converter(inputs={"pdf"}, outputs={"odt"}, engine="libreoffice", cost=2, terminal=True,
+           notes=lambda s, d, o: _PDF_REBUILT)
 def pdf_to_writer(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     soffice_convert(src, dst, dst_fmt, infilter="writer_pdf_import")

@@ -10,6 +10,7 @@ import stat
 import sys
 from pathlib import Path
 
+from . import cancel
 from .errors import ConversionError
 
 # Names Windows keeps for devices, with or without an extension ("CON", "nul.txt", "COM¹")
@@ -126,6 +127,7 @@ def copy_capped(fin, target: Path, limit: int | None, budget: Budget, label: str
     written = 0
     with open(target, "xb") as fout:  # x: a name that's somehow taken is never overwritten
         while chunk := fin.read(1 << 20):
+            cancel.check()  # 1 MB at a time: a big archive stops within moments
             written += len(chunk)
             if limit is not None and written > limit:
                 raise Refused(f"{label} holds more data than the archive says (it's damaged or "

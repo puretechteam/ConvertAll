@@ -112,13 +112,12 @@ def _load(src: Path, fmt: str):
         return _read_sbv(src)
     if fmt == "sub" and b"\x00" in src.read_bytes()[:16]:
         raise ConversionError("This .sub holds DVD subtitle pictures (VobSub), not text")
+    text = read_text(src)  # UTF-8, Notepad's UTF-16, or the old Windows code page
     try:
         try:
-            return pysubs2.load(str(src), encoding="utf-8-sig", format_=PYSUBS2[fmt])
+            return pysubs2.SSAFile.from_string(text, format_=PYSUBS2[fmt])
         except pysubs2.exceptions.UnknownFPSError:  # MicroDVD without a frame-rate line
-            return pysubs2.load(str(src), encoding="utf-8-sig", format_=PYSUBS2[fmt], fps=MICRODVD_FPS)
-        except UnicodeDecodeError:  # older subtitle files are often in the local code page
-            return pysubs2.load(str(src), encoding="cp1252", format_=PYSUBS2[fmt], fps=MICRODVD_FPS)
+            return pysubs2.SSAFile.from_string(text, format_=PYSUBS2[fmt], fps=MICRODVD_FPS)
     except pysubs2.exceptions.Pysubs2Error as exc:
         raise ConversionError(f"Couldn't read these subtitles: {exc}") from None
 

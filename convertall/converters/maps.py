@@ -14,6 +14,7 @@ from ..errors import ConversionError
 from ..losses import loss
 from ..registry import converter
 from ..safety import read_capped
+from ..textfile import decode
 
 MAPS = {"gpx", "kml", "kmz", "geojson"}
 
@@ -266,8 +267,8 @@ def _gj_points(coords, times=None) -> list[Point]:
 
 def read_geojson(data: bytes) -> Map:
     try:
-        obj = json.loads(data.decode("utf-8-sig"))
-    except (ValueError, UnicodeDecodeError) as exc:
+        obj = json.loads(decode(data))
+    except ValueError as exc:
         raise ConversionError(f"Not a GeoJSON file: {exc}") from None
     try:
         return _geojson_map(obj)

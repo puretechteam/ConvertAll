@@ -620,3 +620,107 @@ def test_start_menu_error_without_a_message(monkeypatch, tmp_path):
     monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: gui.subprocess.CompletedProcess(a, 1, "", "  \n"))
     with pytest.raises(OSError, match="couldn't write the shortcut"):
         gui.install_start_menu()
+
+
+# ---- Cancel, and closing the window while a conversion runs
+
+def _slow_route(monkeypatch, tmp_path):
+    """txt -> pdf through an engine that runs 30 s (unless killed); returns a function that
+    gives the engine's pid once it has started."""
+    import sys
+
+    from convertall import engines, pipeline, registry
+    pid_file = tmp_path / "engine.pid"
+    script = tmp_path / "engine.py"
+    script.write_text(f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(30)\n")
+
+    def slow(src, dst, a, b):
+        engines.run([sys.executable, str(script)])
+        dst.write_text("done")
+    route = registry.Route("txt", "pdf", [registry.Edge("txt", "pdf", slow)])
+    monkeypatch.setattr(pipeline, "find_route", lambda *a, **k: route)
+    return lambda: int(pid_file.read_text()) if pid_file.exists() and pid_file.read_text() else None
+
+
+def _pump(app, until, seconds=10):
+    import time
+    deadline = time.monotonic() + seconds
+    while not until() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    return until()
+
+
+def _start_slow_job(app, window, tmp_path, monkeypatch, files=1):
+    pid = _slow_route(monkeypatch, tmp_path)
+    srcs = []
+    for i in range(files):
+        src = tmp_path / f"in{i}.txt"
+        src.write_text("x")
+        srcs.append(src)
+    window.show()
+    window.files, window.fmts = srcs, ["txt"] * files
+    job = gui.Job(srcs, "pdf", [])
+    window.run_job(job)
+    assert _pump(app, lambda: pid() is not None), "the engine never started"
+    return job, pid(), srcs
+
+
+def _engine_alive(pid):
+    import subprocess
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, check=False)
+    return str(pid) in out.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="checks the engine with tasklist")
+def test_closing_mid_conversion_stops_it_and_closes(app, window, tmp_path, monkeypatch):
+    job, pid, _ = _start_slow_job(app, window, tmp_path, monkeypatch)
+    assert window.convert_btn.text() == "Cancel" and window.convert_btn.isEnabled()
+    monkeypatch.setattr(window, "confirm_stop", lambda: True)  # "Stop and close"
+    import time
+    asked = time.monotonic()
+    window.close()
+    assert not window.isVisible()  # gone from the screen at once
+    assert _pump(app, lambda: window.job is None)
+    assert time.monotonic() - asked < 2
+    assert job.isFinished() or job.wait(2000)
+    assert not _engine_alive(pid)
+    assert not (tmp_path / "in0.pdf").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="checks the engine with tasklist")
+def test_keep_converting_leaves_the_job_running_then_cancel_stops_it(app, window, tmp_path, monkeypatch):
+    job, pid, _ = _start_slow_job(app, window, tmp_path, monkeypatch, files=3)
+    monkeypatch.setattr(window, "confirm_stop", lambda: False)  # "Keep converting"
+    window.close()
+    assert window.isVisible() and job.isRunning() and _engine_alive(pid)
+    window.convert_clicked()  # the Convert button is Cancel while it runs
+    assert window.convert_btn.text() == "Stopping…" and not window.convert_btn.isEnabled()
+    assert _pump(app, lambda: window.job is None)
+    assert not _engine_alive(pid)
+    assert window.status.text() == "Stopped" and window.note.text() == "Nothing was saved"
+    assert window.convert_btn.text() == "Convert"
+    assert not list(tmp_path.glob("in*.pdf"))
+
+
+def test_cancel_between_files_keeps_the_ones_done(window, tmp_path, monkeypatch):
+    from convertall import pipeline
+    srcs = []
+    for i in range(3):
+        src = tmp_path / f"in{i}.txt"
+        src.write_text("x")
+        srcs.append(src)
+    job = gui.Job(srcs, "pdf", [])
+
+    def convert(f, target, report=None, options=None):
+        out = f.with_suffix(".pdf")
+        out.write_text("done")
+        job.cancel()  # Cancel clicked while the first file was converting: it still finishes
+        return out
+    monkeypatch.setattr(pipeline, "convert", convert)
+    window.files, window.fmts = srcs, ["txt"] * 3
+    _run_now(window)
+    window.run_job(job)
+    assert [p.name for p in window.outputs] == ["in0.pdf"]
+    assert window.status.text() == "Stopped"
+    assert window.note.text() == "1 saved, 2 not converted"

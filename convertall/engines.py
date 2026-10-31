@@ -236,11 +236,22 @@ def install(key: str, log: Callable[[str], None] | None = None) -> bool:
 def run(args: list[str], timeout: float | None = None, cwd: str | None = None,
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run an engine command, raising ConversionError with the tail of its output on failure.
-    env adds to (not replaces) our own environment."""
-    proc = subprocess.run([str(a) for a in args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", creationflags=NO_WINDOW, timeout=timeout, cwd=cwd, check=False,
+    env adds to (not replaces) our own environment. Stopping the conversion (cancel.py) kills it."""
+    from . import cancel
+    cancel.check()
+    cmd = [str(a) for a in args]
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                          errors="replace", creationflags=NO_WINDOW, cwd=cwd,
                           env={**os.environ, **env} if env else None,
-                          stdin=subprocess.DEVNULL)  # an engine that asks a question gets no answer, not a hang
+                          stdin=subprocess.DEVNULL) as p, cancel.track(p):  # a question gets no answer, not a hang
+        try:
+            stdout, stderr = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            cancel._kill(p)
+            p.communicate()
+            raise
+    proc = subprocess.CompletedProcess(cmd, p.returncode, stdout, stderr)
+    cancel.check()  # killed: say it was stopped, not that the engine failed
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise ConversionError("\n".join(msg[-6:]) or f"{args[0]} failed ({proc.returncode})")

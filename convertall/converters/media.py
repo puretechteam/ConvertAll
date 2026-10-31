@@ -8,6 +8,10 @@ from ..losses import loss
 from ..registry import converter, option
 
 EVEN = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]  # H.264/yuv420p needs even dimensions
+# FFmpeg can't read back Theora under 18 pixels a side: smaller pictures are enlarged, shape kept
+THEORA_MIN = 18
+_GROW = f"max(1,{THEORA_MIN}/min(iw,ih))"
+EVEN_THEORA = ["-vf", f"scale='trunc(iw*{_GROW}/2+0.5)*2':'trunc(ih*{_GROW}/2+0.5)*2'"]
 H264 = ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-pix_fmt", "yuv420p", *EVEN]
 AAC = ["-c:a", "aac", "-b:a", "160k"]
 
@@ -45,7 +49,7 @@ VIDEO_ARGS = {
     "avi": ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "libmp3lame", "-q:a", "3"],
     "wmv": ["-c:v", "wmv2", "-b:v", "4M", *EVEN, "-c:a", "wmav2", "-b:a", "192k"],
     "mpg": ["-c:v", "mpeg2video", "-q:v", "3", "-c:a", "mp2", "-b:a", "192k"],
-    "ogv": ["-c:v", "libtheora", "-q:v", "7", "-pix_fmt", "yuv420p", *EVEN, "-c:a", "libvorbis", "-q:a", "5"],
+    "ogv": ["-c:v", "libtheora", "-q:v", "7", "-pix_fmt", "yuv420p", *EVEN_THEORA, "-c:a", "libvorbis", "-q:a", "5"],
     "f4v": [*H264, *AAC],
     "asf": ["-c:v", "wmv2", "-b:v", "4M", *EVEN, "-c:a", "wmav2", "-b:a", "192k"],
     "vob": ["-c:v", "mpeg2video", "-q:v", "3", *EVEN, "-c:a", "ac3", "-b:a", "192k"],
@@ -170,6 +174,9 @@ def _video_notes(src: str, dst: str, opts: dict) -> list:
     out = [loss("The video is re-encoded: a little quality is lost", weight=0), TRACKS]
     if opts.get("video_size"):
         out.append(loss(f"Scaled down to at most {opts['video_size']}", weight=0, affects=("width", "height")))
+    if dst == "ogv":
+        out.append(loss(f"OGV pictures are at least {THEORA_MIN} pixels a side: smaller ones are enlarged",
+                        weight=0, affects=("width", "height")))
     return out
 
 

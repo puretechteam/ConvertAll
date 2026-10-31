@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..errors import ConversionError
 from ..registry import converter
+from ..textfile import read_text
 from .markup import page
 
 
@@ -17,7 +18,7 @@ def _text(value) -> str:
 
 def _load(src: Path) -> tuple[list[dict], str]:
     try:
-        nb = json.loads(src.read_text(encoding="utf-8-sig"))
+        nb = json.loads(read_text(src))
         cells = nb["cells"] if "cells" in nb else [c for ws in nb["worksheets"] for c in ws["cells"]]  # v3
     except (ValueError, KeyError, TypeError) as exc:
         raise ConversionError(f"Not a Jupyter notebook: {exc}") from None

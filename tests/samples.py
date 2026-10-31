@@ -8,9 +8,11 @@ import shutil
 import sqlite3
 import struct
 import tarfile
+import uuid
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from convertall import engines
@@ -343,6 +345,211 @@ def _font(path: Path, cff: bool) -> None:
     fb.save(str(path))
 
 
+def _text_font() -> bytes:
+    """A TrueType font whose every glyph is a box: enough to carry real, extractable text."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    chars = sorted(set(TEXT + ". "))
+    names = [".notdef"] + [f"g{ord(c)}" for c in chars]
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder(names)
+    fb.setupCharacterMap({ord(c): f"g{ord(c)}" for c in chars})
+    glyphs = {".notdef": TTGlyphPen(None).glyph()}
+    for c in chars:
+        pen = TTGlyphPen(None)
+        if c != " ":
+            pen.moveTo((50, 0))
+            for corner in ((50, 700), (550, 700), (550, 0)):
+                pen.lineTo(corner)
+            pen.closePath()
+        glyphs[f"g{ord(c)}"] = pen.glyph()
+    fb.setupGlyf(glyphs)
+    fb.setupHorizontalMetrics({n: (600, 50) for n in names})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Sample", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    buf = io.BytesIO()
+    fb.save(buf)
+    return buf.getvalue()
+
+
+def write_xps(path: Path, open_xps: bool = False) -> None:
+    """Two fixed pages with a shape and a line of text in an embedded font. open_xps: the ECMA
+    OpenXPS flavour (.oxps), which differs in its namespaces."""
+    ns = "http://schemas.openxps.org/oxps/v1.0" if open_xps else "http://schemas.microsoft.com/xps/2005/06"
+    rel = ns + "/fixedrepresentation" if open_xps else "http://schemas.microsoft.com/xps/2005/06/fixedrepresentation"
+    pages = 2
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml"/>'
+                   '<Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml"/>'
+                   '<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml"/>'
+                   '<Default Extension="ttf" ContentType="application/vnd.ms-opentype"/></Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="utf-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="R0" Type="{rel}" Target="/FixedDocSeq.fdseq"/></Relationships>')
+        z.writestr("FixedDocSeq.fdseq", f'<FixedDocumentSequence xmlns="{ns}"><DocumentReference Source="/Documents/1/FixedDoc.fdoc"/></FixedDocumentSequence>')
+        z.writestr("Documents/1/FixedDoc.fdoc", f'<FixedDocument xmlns="{ns}">'
+                   + "".join(f'<PageContent Source="Pages/{i}.fpage"/>' for i in range(1, pages + 1)) + "</FixedDocument>")
+        z.writestr("Resources/sample.ttf", _text_font())
+        for i in range(1, pages + 1):
+            z.writestr(f"Documents/1/Pages/{i}.fpage",
+                       f'<FixedPage xmlns="{ns}" Width="816" Height="1056" xml:lang="en-US">'
+                       f'<Path Data="M 96,300 L 500,300 500,{400 + 40 * i} 96,{400 + 40 * i} Z" Fill="#FF3366CC"/>'
+                       f'<Glyphs FontUri="/Resources/sample.ttf" FontRenderingEmSize="24" OriginX="96" OriginY="200" '
+                       f'Fill="#FF000000" UnicodeString="{TEXT} {i}."/></FixedPage>')
+
+
+def write_dng(path: Path) -> None:
+    """A Linear DNG (demosaiced 16-bit RGB, the kind DNG converters write), built tag by tag as
+    the DNG specification lays it out: one uncompressed strip, an identity colour matrix under
+    D65, neutral white."""
+    rgb = np.asarray(picture().convert("RGB"), np.uint16) * 257
+    h, w, _ = rgb.shape
+    pixels = rgb.astype("<u2").tobytes()
+    entries = []  # (tag, type, count, value bytes)
+
+    def tag(t, typ, values):
+        fmt = {1: "B", 2: "s", 3: "H", 4: "I", 5: "II", 10: "ii"}[typ]
+        if typ == 2:
+            data = values.encode() + b"\0"
+        elif typ in (5, 10):  # (numerator, denominator) pairs
+            data = b"".join(struct.pack("<" + fmt, *v) for v in values)
+        else:
+            data = struct.pack(f"<{len(values)}{fmt}", *values)
+        entries.append((t, typ, len(data) if typ == 2 else len(values), data))
+
+    ident = [(1, 1), (0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (0, 1), (0, 1), (1, 1)]
+    for t, typ, values in (
+            (254, 4, [0]), (256, 4, [w]), (257, 4, [h]), (258, 3, [16, 16, 16]), (259, 3, [1]),
+            (262, 3, [34892]),  # LinearRaw
+            (271, 2, "ConvertAll"), (272, 2, "Sample"), (273, 4, [0]), (274, 3, [1]), (277, 3, [3]),
+            (278, 4, [h]), (279, 4, [len(pixels)]), (284, 3, [1]),
+            (50706, 1, [1, 4, 0, 0]), (50707, 1, [1, 1, 0, 0]), (50708, 2, "ConvertAll Sample"),  # DNG version, model
+            (50717, 4, [65535] * 3), (50721, 10, ident), (50728, 5, [(1, 1)] * 3),  # white level, colour, neutral
+            (50778, 3, [21])):  # calibrated under D65
+        tag(t, typ, values)
+    entries.sort()
+    ifd_size = 2 + 12 * len(entries) + 4
+    extra_at = 8 + ifd_size
+    extra = b""
+    body = struct.pack("<H", len(entries))
+    strip_index = None
+    for t, typ, count, data in entries:
+        if len(data) <= 4:
+            body += struct.pack("<HHI", t, typ, count) + data.ljust(4, b"\0")
+        else:
+            body += struct.pack("<HHII", t, typ, count, extra_at + len(extra))
+            extra += data + (b"\0" if len(data) % 2 else b"")
+        if t == 273:
+            strip_index = len(body) - 4
+    body += struct.pack("<I", 0)
+    pixel_at = extra_at + len(extra)
+    body = body[:strip_index] + struct.pack("<I", pixel_at) + body[strip_index + 4:]
+    path.write_bytes(b"II*\0" + struct.pack("<I", 8) + body + extra + pixels)
+
+
+def write_wpd(path: Path) -> None:
+    """A WordPerfect 5.1 document: the 16-byte file prefix (-1 'WPC', document offset, product 1,
+    file type 10, version 0.1, not encrypted), then the text itself, paragraphs ended by hard
+    returns (0x0A)."""
+    body = f"{TEXT}.\nSecond paragraph.\n".encode("ascii")
+    prefix = b"\xffWPC" + struct.pack("<IBBBBHH", 16, 1, 10, 0, 1, 0, 0)
+    path.write_bytes(prefix + body)
+
+
+VISIO = "http://schemas.microsoft.com/office/visio/2012/main"
+OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+VISIO_REL = "http://schemas.microsoft.com/visio/2010/relationships"
+
+
+def write_vsdx(path: Path) -> None:
+    """A Visio drawing (VSDX, an Open Packaging zip like DOCX): one page with a box holding a
+    line of text."""
+    def rels(*items):
+        return ('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                + "".join(f'<Relationship Id="rId{i}" Type="{t}" Target="{target}"/>' for i, (t, target) in enumerate(items, 1))
+                + "</Relationships>")
+    cell = lambda n, v: f'<Cell N="{n}" V="{v}"/>'
+    corners = [(0, 0), (3, 0), (3, 1.5), (0, 1.5), (0, 0)]
+    geometry = "".join(f'<Row T="{"MoveTo" if i == 0 else "LineTo"}" IX="{i + 1}">{cell("X", x)}{cell("Y", y)}</Row>'
+                       for i, (x, y) in enumerate(corners))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>'
+                   '<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>'
+                   '<Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.page+xml"/></Types>')
+        z.writestr("_rels/.rels", rels((f"{VISIO_REL}/document", "visio/document.xml")))
+        z.writestr("visio/_rels/document.xml.rels", rels((f"{VISIO_REL}/pages", "pages/pages.xml")))
+        z.writestr("visio/pages/_rels/pages.xml.rels", rels((f"{VISIO_REL}/page", "page1.xml")))
+        z.writestr("visio/document.xml", f'<?xml version="1.0" encoding="UTF-8"?><VisioDocument xmlns="{VISIO}" xmlns:r="{OFFICE_REL}"/>')
+        z.writestr("visio/pages/pages.xml",
+                   f'<?xml version="1.0" encoding="UTF-8"?><Pages xmlns="{VISIO}" xmlns:r="{OFFICE_REL}"><Page ID="0" Name="Page-1">'
+                   f'<PageSheet>{cell("PageWidth", 8.5)}{cell("PageHeight", 11)}</PageSheet><Rel r:id="rId1"/></Page></Pages>')
+        z.writestr("visio/pages/page1.xml",
+                   f'<?xml version="1.0" encoding="UTF-8"?><PageContents xmlns="{VISIO}" xmlns:r="{OFFICE_REL}"><Shapes>'
+                   f'<Shape ID="1" Type="Shape">{cell("PinX", 4)}{cell("PinY", 6)}{cell("Width", 3)}{cell("Height", 1.5)}'
+                   f'{cell("LocPinX", 1.5)}{cell("LocPinY", 0.75)}<Section N="Geometry" IX="0">{geometry}</Section>'
+                   f'<Text>{TEXT}</Text></Shape></Shapes></PageContents>')
+
+
+def _encint(n: int) -> bytes:
+    """CHM's variable-length number: 7 bits a byte, most significant first, high bit = more."""
+    out = [n & 0x7F]
+    n >>= 7
+    while n:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    return bytes(reversed(out))
+
+
+def write_chm(path: Path) -> None:
+    """A compiled HTML help file (ITSF version 3): two pages, a picture and a contents file, all
+    in the uncompressed section 0, which the format allows next to the usual LZX one."""
+    page = lambda title, body: (f"<html><head><title>{title}</title></head><body><h1>{title}</h1>"
+                                f"<p>{body}</p></body></html>").encode("cp1252")
+    hhc = ('<html><body><ul><li><object type="text/sitemap"><param name="Name" value="Welcome">'
+           '<param name="Local" value="index.html"></object><li><object type="text/sitemap">'
+           '<param name="Name" value="Second page"><param name="Local" value="page2.html"></object></ul></body></html>')
+    record = lambda code, value: struct.pack("<HH", code, len(value) + 1) + value.encode("cp1252") + b"\0"
+    section = "Uncompressed".encode("utf-16-le")
+    names = struct.pack("<HH", 0, 1) + struct.pack("<H", len(section) // 2) + section + bytes(2)
+    names = struct.pack("<H", len(names) // 2) + names[2:]  # its length in 16-bit words, then its one section
+    files = {
+        "::DataSpace/NameList": names,
+        "/#SYSTEM": struct.pack("<I", 3) + record(0, "toc.hhc") + record(2, "index.html") + record(3, "Sample help"),
+        "/index.html": page("Welcome", f'{TEXT}. <img src="pic.png">'),
+        "/page2.html": page("Second page", "More text on a second page."),
+        "/pic.png": _png(picture()),
+        "/toc.hhc": hhc.encode("cp1252"),
+    }
+    content, entries = b"", b""
+    for name, data in sorted(files.items()):
+        entries += _encint(len(name)) + name.encode() + _encint(0) + _encint(len(content)) + _encint(len(data))
+        content += data
+    chunk_size = 0x1000
+    chunk = b"PMGL" + struct.pack("<IIii", chunk_size - 20 - len(entries), 0, -1, -1) + entries
+    chunk = chunk.ljust(chunk_size, b"\0")
+    itsp = (b"ITSP" + struct.pack("<IIIIIIiiiiII", 1, 0x54, 0x0A, chunk_size, 2, 1, -1, 0, 0, -1, 1, 0x409)
+            + uuid.UUID("5D02926A-212E-11D0-9DF9-00A0C922E6EC").bytes_le + struct.pack("<Iiii", 0x54, -1, -1, -1))
+    directory = itsp + chunk
+    hs0_off, hs0_len = 0x60, 0x18
+    dir_off = hs0_off + hs0_len
+    content_off = dir_off + len(directory)
+    total = content_off + len(content)
+    itsf = (b"ITSF" + struct.pack("<IIIII", 3, 0x60, 1, 0, 0x409)
+            + uuid.UUID("7C01FD10-7BAA-11D0-9E0C-00A0C922E6EC").bytes_le
+            + uuid.UUID("7C01FD11-7BAA-11D0-9E0C-00A0C922E6EC").bytes_le
+            + struct.pack("<QQQQQ", hs0_off, hs0_len, dir_off, len(directory), content_off))
+    hs0 = struct.pack("<IIQII", 0x01FE, 0, total, 0, 0)
+    path.write_bytes(itsf + hs0 + directory + content)
+
+
 # ---------------------------------------------------------------- engine-made samples
 
 def _ffmpeg(args: list, path: Path) -> Path | None:
@@ -369,6 +576,14 @@ def _video(fmt: str, path: Path) -> Path | None:
         return _ffmpeg([*AV_IN, "-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s", *args,
                         "-c:s", SUB_CODEC[fmt], "-shortest"], path)
     return _ffmpeg([*AV_IN, *args, "-shortest"], path)
+
+
+def _magick(src: Path, path: Path) -> Path | None:
+    exe = engines.find("imagemagick")
+    if not exe:
+        return None
+    engines.run([exe, str(src), str(path)], timeout=120)
+    return path
 
 
 def _soffice(src: Path, path: Path, filt: str) -> Path | None:
@@ -420,6 +635,13 @@ class Samples:
             return p
         if fmt in ("ps", "eps"):  # vector PostScript with real text (Pillow's EPS would be a bitmap)
             p.write_text(EPS if fmt == "eps" else PS, encoding="ascii")
+            return p
+        if fmt in ("jxl", "exr", "hdr"):  # ImageMagick reads these for ConvertAll, and writes them too
+            return _magick(self("png"), p)
+        writer = {"dng": write_dng, "xps": write_xps, "oxps": lambda q: write_xps(q, open_xps=True),
+                  "wpd": write_wpd, "vsdx": write_vsdx, "chm": write_chm}.get(fmt)
+        if writer:  # formats nothing here can save, made by hand from their specifications
+            writer(p)
             return p
         if fmt in images.WRITE - {"pdf"}:
             images.save_image(images.prepare(img, fmt), p, fmt)

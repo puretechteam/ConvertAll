@@ -2,6 +2,17 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## Unreleased
+
+- **Added: Cancel.** While a conversion runs, the *Convert* button becomes *Cancel*. It stops the engine at once (FFmpeg, LibreOffice and the rest, with anything they started; measured within 1 s), writes nothing half-made, and keeps the files already done (*Stopped*, with *1 saved, 2 not converted* under it).
+- **Fixed: closing the window during a conversion.** ConvertAll used to quit with an error (exit code 127 in 10 of 10 tries) and leave the engine running in the background. Now it asks *Stop converting and close?*, stops the engine and closes cleanly: exit code 0 in 10 of 10, no engine left running, no temporary folder left behind.
+- **Changed: converting with the check is faster.** The original is read once, for the check and the conversion, instead of twice. A 24-megapixel TIFF to PNG takes 3.91 s instead of 4.35 s (10% faster), MOBI to EPUB 0.30 s instead of 0.41 s (26%), FB2 to EPUB and a rigged GLB to STL about 8% faster. The results are the same.
+- **Fixed: text files saved as "Unicode" in Notepad (UTF-16).** Subtitles (SRT, VTT, ASS and the rest) came out garbled; GeoJSON maps and Jupyter notebooks failed to open, also when saved in the old Windows encoding. All of them are read correctly now.
+- **Fixed: animations made into AVIF or WebP** (a video or GIF turned into an animated picture) got a false warning, *Length: 2.1 s → 0*. The check now reads how long those animations really run.
+- **Fixed: PDF to Markdown, LaTeX, reStructuredText, Org, AsciiDoc and MediaWiki came out empty.** LibreOffice opens a PDF as positioned text boxes, which Pandoc skipped on that route. These now go through Word (DOCX), where Pandoc reads them, and keep the text of every page.
+- **Fixed: very small pictures (under 18 pixels a side) made into OGV** gave a video no player could open. They are now enlarged to 18 pixels, keeping their shape, and the report says so.
+- **Changed: a conversion waiting for LibreOffice** (while another ConvertAll window uses it) can be cancelled, and gives up after 15 minutes with a message instead of waiting forever.
+
 ## 2026-10-30: ConvertAll 1.2.0
 
 - **Changed: Calibre is no longer needed.** Every ebook conversion is now done by [bookport](https://github.com/puretechteam/bookport), a pure-Python ebook library made for ConvertAll (3.0 MB, against Calibre's 666.5 MB install). Measured against Calibre 9.17 on the same 13 books (median per conversion):

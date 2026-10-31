@@ -507,3 +507,17 @@ def test_transparency_check_reads_every_picture_kind(fmt, tmp_path):
         assert facts["width"] == (1024 if fmt == "icns" else 64)  # ICNS opens at its biggest size
         if fmt != "icns":  # ICNS keeps no transparency for this size in Pillow's writer
             assert facts["transparency"] == see_through, (fmt, mode)
+
+
+@pytest.mark.parametrize("fmt", ["avif", "webp", "png"])
+def test_an_animations_length_is_measured_in_every_format(tmp_path, fmt):
+    """Pillow gives an AVIF frame its duration only once the frame is decoded: the check must
+    still find the length (it read 0 s and warned on every animation made into AVIF)."""
+    from PIL import Image
+    frames = [Image.new("RGB", (40, 30), (40 * i, 0, 0)) for i in range(6)]
+    src = tmp_path / "anim.gif"
+    frames[0].save(src, save_all=True, append_images=frames[1:], duration=200, loop=0)
+    report = Report()
+    out = pipeline.convert(src, fmt, out_dir=tmp_path / "out", report=report)
+    assert assurance.inspect(out, fmt)["duration"] == pytest.approx(1.2, abs=0.05)
+    assert not report.warnings, report.lines()
