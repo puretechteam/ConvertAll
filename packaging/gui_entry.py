@@ -1,5 +1,5 @@
 import sys
 
-from convertall.gui import main
+from convertall.instance import main
 
 sys.exit(main())

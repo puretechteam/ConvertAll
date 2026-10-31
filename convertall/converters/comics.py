@@ -8,7 +8,8 @@ from PIL import Image, ImageOps
 
 from ..detect import COMICS
 from ..errors import ConversionError
-from ..registry import converter
+from ..losses import loss
+from ..registry import converter, note, option
 from .archives import compress, extract_to
 from .images import READ as PIL_READ
 from .images import enable_heif, prepare
@@ -63,7 +64,10 @@ def images_to_pdf(pages: list[Path], dst: Path) -> None:
 @converter(inputs={"cbr"}, outputs={"pdf"}, engine="7zip", terminal=True)
 def comic_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     work = dst.parent / "_pages"
-    extract_to(src, work, src_fmt)
+    found: list[str] = []
+    extract_to(src, work, src_fmt, found)
+    for line in found:
+        note(line)
     pages = _pages(work)
     if not pages:
         raise ConversionError("No page images found in this comic")
@@ -95,12 +99,14 @@ def _page_image(doc, page) -> tuple[bytes, str] | None:
     return info["image"], "jpg" if info["ext"] == "jpeg" else "png"
 
 
-@converter(inputs={"pdf"}, outputs=WRITABLE, terminal=True)
+@converter(inputs={"pdf"}, outputs=WRITABLE, terminal=True, options=("dpi",),
+           notes=lambda s, d, o: [loss(f"Pages are drawn as pictures at {o.get('dpi') or PDF_DPI} dpi (a page that "
+                                       "is one picture is kept as it is)", weight=0)])
 def pdf_to_comic(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import pymupdf
     work = dst.parent / "_pages"
     work.mkdir()
-    zoom = PDF_DPI / 72
+    zoom = int(option("dpi", PDF_DPI)) / 72
     with pymupdf.open(src) as doc:
         width = max(3, len(str(doc.page_count)))
         for i, page in enumerate(doc, 1):

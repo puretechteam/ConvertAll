@@ -1,4 +1,4 @@
-"""PDF, XPS, SVG and light ebook handling via PyMuPDF; PostScript and EPS via Ghostscript."""
+"""PDF, XPS and SVG via PyMuPDF; PostScript and EPS via Ghostscript."""
 
 import html
 import shutil
@@ -7,10 +7,12 @@ from pathlib import Path
 from PIL import Image
 
 from ..errors import ConversionError
-from ..registry import converter
+from ..losses import loss
+from ..registry import converter, option
+from ..safety import read_capped
 from ..textfile import read_text
+from .images import QUALITY, prepare, save_image
 from .images import WRITE as RASTER_OUT
-from .images import prepare, save_image
 
 RASTER_OUT = RASTER_OUT - {"pdf", "eps"}  # PDF -> EPS stays vector (Ghostscript)
 PAGED = {"pdf", "xps", "oxps"}
@@ -25,13 +27,17 @@ def open_doc(src: Path):
     with src.open("rb") as f:
         zipped = f.read(2) == b"\x1f\x8b"
     if zipped:
-        return pymupdf.open(stream=gzip.decompress(src.read_bytes()), filetype="svg")
+        try:
+            with gzip.open(src) as f:
+                svg = read_capped(f, src.name)
+        except (OSError, EOFError) as exc:
+            raise ConversionError(f"{src.name} is a damaged .svgz: {exc}") from None
+        return pymupdf.open(stream=svg, filetype="svg")
     return pymupdf.open(src)
 
 
 @converter(inputs={"xps", "oxps"}, outputs={"pdf"})
 @converter(inputs={"svg"}, outputs={"pdf"}, terminal=True)  # picture-only PDFs: don't chain on
-@converter(inputs={"epub", "fb2", "mobi"}, outputs={"pdf"}, cost=2)
 def to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     with open_doc(src) as doc:
         dst.write_bytes(doc.convert_to_pdf())
@@ -58,10 +64,19 @@ def _save_page(page, path: Path, fmt: str) -> None:
     if fmt == "svg":  # vector stays vector; text becomes outlines so it looks the same everywhere
         path.write_text(page.get_svg_image(text_as_path=True), encoding="utf-8")
     else:
-        save_image(_render(page, fmt, PDF_DPI / 72, False), path, fmt)
+        save_image(_render(page, fmt, int(option("dpi", PDF_DPI)) / 72, False), path, fmt)
 
 
-@converter(inputs=PAGED, outputs=RASTER_OUT | {"svg"}, terminal=True)
+def _page_notes(src: str, dst: str, opts: dict) -> list:
+    if dst == "svg":
+        return [loss("Each page becomes its own SVG, together in a folder", "pages", weight=0, affects=("pages",)),
+                loss("Text becomes outlines: it can't be selected or searched", "text")]
+    return [loss(f"Pages are drawn as pictures at {opts.get('dpi') or PDF_DPI} dpi", weight=0),
+            loss("Each page becomes its own image, together in a folder", "pages", weight=0, affects=("pages",))]
+
+
+@converter(inputs=PAGED, outputs=RASTER_OUT | {"svg"}, terminal=True, notes=_page_notes,
+           options=lambda s, d: () if d == "svg" else ("dpi", "quality") if d in QUALITY else ("dpi",))
 def pages_to_images(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     """One page -> one image file. Several pages -> a folder of page images."""
     with open_doc(src) as doc:
@@ -85,7 +100,7 @@ def svg_to_image(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
         save_image(_render(page, dst_fmt, zoom, True), dst, dst_fmt)
 
 
-@converter(inputs=PAGED | {"epub", "fb2", "mobi"}, outputs={"txt"}, terminal=True)
+@converter(inputs=PAGED, outputs={"txt"}, terminal=True)  # ebooks: bookport (ebooks.py)
 def to_text(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     with open_doc(src) as doc:
         dst.write_text("\n\n".join(page.get_text().strip() for page in doc), encoding="utf-8")
@@ -94,7 +109,9 @@ def to_text(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 _CSS = "* {font-family: sans-serif; font-size: 11pt; line-height: 1.4} pre, code {font-family: monospace}"
 
 
-@converter(inputs={"html", "txt"}, outputs={"pdf"}, cost=2)
+@converter(inputs={"html", "txt"}, outputs={"pdf"}, cost=2,
+           notes=lambda s, d, o: [loss("Laid out as plain A4 pages: scripts don't run and some page styles "
+                                       "are simplified", weight=0)] if s == "html" else [])
 def html_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import pymupdf
     text = read_text(src)

@@ -6,3 +6,11 @@ dist/
 .pytest_cache/
 app/
 .ruff_cache/
+.env*
+!.env.example
+*.key
+*.pem
+*.log
+.DS_Store
+.idea/
+.cache/

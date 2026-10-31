@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from ..errors import ConversionError
+from ..losses import loss
 from ..registry import converter
 from .images import WRITE as IMAGE_OUT
 from .images import prepare, save_image
@@ -53,7 +54,15 @@ def _frames(ds) -> list[Image.Image]:
     return [Image.fromarray(np.ascontiguousarray(f).astype(np.uint8), "RGB") for f in arr]
 
 
-@converter(inputs={"dcm"}, outputs=IMAGE_OUT, terminal=True)
+def _image_notes(src: str, dst: str, opts: dict) -> list:
+    out = [loss("Scanner values are scaled to 8 bits for viewing (the window the scan chose): measurements such "
+                "as Hounsfield units and patient details are left out", weight=0)]
+    if dst not in SERIES_IN_ONE_FILE:
+        out.append(loss("A series becomes a folder of frames", "frames", weight=0, affects=("frames",)))
+    return out
+
+
+@converter(inputs={"dcm"}, outputs=IMAGE_OUT, terminal=True, notes=_image_notes)
 def dicom_to_image(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     """One frame -> one image. A multi-frame series -> animated file if the format allows, else a folder."""
     frames = [prepare(f, dst_fmt) for f in _frames(_read(src))]
@@ -88,7 +97,8 @@ def _to_dict(ds) -> dict:
     return out
 
 
-@converter(inputs={"dcm"}, outputs={"json"}, terminal=True)
+@converter(inputs={"dcm"}, outputs={"json"}, terminal=True,
+           notes=lambda s, d, o: [loss("Only the details are kept: the image itself is left out", weight=0)])
 def dicom_to_json(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     ds = _read(src)
     data = _to_dict(ds)

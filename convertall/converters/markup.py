@@ -3,6 +3,7 @@
 import html
 from pathlib import Path
 
+from ..losses import loss
 from ..registry import converter
 from ..textfile import read_text
 
@@ -29,7 +30,9 @@ def markdown_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     dst.write_text(page(src.stem, body), encoding="utf-8")
 
 
-@converter(inputs={"html"}, outputs={"md"})
+@converter(inputs={"html"}, outputs={"md"},
+           notes=lambda s, d, o: [loss("Markdown keeps headings, lists, links, tables and emphasis: page styles "
+                                       "and scripts are left out", weight=0)])
 def html_to_markdown(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     from bs4 import BeautifulSoup
     from markdownify import markdownify
@@ -56,7 +59,9 @@ p[style-name='Quote'] => blockquote > p:fresh
 """
 
 
-@converter(inputs={"docx"}, outputs={"html"})
+@converter(inputs={"docx"}, outputs={"html"},
+           notes=lambda s, d, o: [loss("Word styles become plain HTML (headings, lists, tables, pictures, "
+                                       "emphasis): fonts and colors are left out", weight=0)])
 def docx_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import mammoth
     with src.open("rb") as f:

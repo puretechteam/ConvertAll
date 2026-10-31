@@ -100,7 +100,9 @@ def test_json_yaml_toml_roundtrip(tmp_path):
 def test_json_to_csv_flattens(tmp_path):
     src = tmp_path / "people.json"
     src.write_text(json.dumps(RECORDS), encoding="utf-8")
-    lines = convert(src, "csv").read_text(encoding="utf-8").splitlines()
+    out = convert(src, "csv")
+    assert out.read_bytes().startswith(b"\xef\xbb\xbf")  # Excel shows accents only with the BOM
+    lines = out.read_text(encoding="utf-8-sig").splitlines()
     assert lines[0] == "name,age,langs.main"
     assert lines[2] == "Linus,28,"
 
@@ -236,6 +238,22 @@ def test_office_documents(tmp_path):
     docx = convert(txt, "odt")
     with pymupdf.open(convert(docx, "pdf")) as doc:
         assert "LibreOffice" in doc[0].get_text()
+
+
+@needs("libreoffice")
+def test_office_documents_from_two_processes_at_once(tmp_path):
+    """Two ConvertAll processes share one LibreOffice profile; the second used to fail (exit 1)."""
+    import subprocess
+    import sys
+    procs = []
+    for i in range(2):
+        (tmp_path / f"d{i}.txt").write_text(f"Document {i}\n" * 40, encoding="utf-8")
+        procs.append(subprocess.Popen([sys.executable, "-m", "convertall", str(tmp_path / f"d{i}.txt"), "--to", "pdf",
+                                       "-o", str(tmp_path / f"o{i}")], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+    for i, p in enumerate(procs):
+        _out, err = p.communicate(timeout=300)
+        assert p.returncode == 0, err.decode(errors="replace")[-300:]
+        assert (tmp_path / f"o{i}" / f"d{i}.pdf").exists()
 
 
 @needs("libreoffice")

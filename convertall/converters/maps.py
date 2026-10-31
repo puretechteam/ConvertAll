@@ -6,11 +6,14 @@ import io
 import json
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import ConversionError
+from ..losses import loss
 from ..registry import converter
+from ..safety import read_capped
 
 MAPS = {"gpx", "kml", "kmz", "geojson"}
 
@@ -244,8 +247,9 @@ def read_kmz(src: Path) -> Map:
             if not names:
                 raise ConversionError("No KML inside this KMZ")
             main = "doc.kml" if "doc.kml" in names else names[0]
-            return read_kml(z.read(main))
-    except zipfile.BadZipFile as exc:
+            with z.open(main) as f:
+                return read_kml(read_capped(f, src.name))
+    except (zipfile.BadZipFile, EOFError, zlib.error) as exc:
         raise ConversionError(f"Not a KMZ file: {exc}") from None
 
 
@@ -265,6 +269,13 @@ def read_geojson(data: bytes) -> Map:
         obj = json.loads(data.decode("utf-8-sig"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise ConversionError(f"Not a GeoJSON file: {exc}") from None
+    try:
+        return _geojson_map(obj)
+    except (AttributeError, TypeError, ValueError, IndexError) as exc:
+        raise ConversionError(f"This GeoJSON doesn't follow the GeoJSON layout ({exc})") from None
+
+
+def _geojson_map(obj) -> Map:
     m = Map(obj.get("name", "") if isinstance(obj, dict) else "")
     features = obj.get("features", []) if obj.get("type") == "FeatureCollection" else [obj]
     for f in features:
@@ -355,7 +366,9 @@ def read_map(src: Path, fmt: str) -> Map:
     return m
 
 
-@converter(inputs=MAPS, outputs=MAPS | {"csv"})
+@converter(inputs=MAPS, outputs=MAPS | {"csv"},
+           notes=lambda s, d, o: [loss("Map styles and folders (colors, icons, grouping) are left out", weight=0)]
+           if s in ("kml", "kmz") else [])
 def map_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     m = read_map(src, src_fmt)
     if dst_fmt == "kmz":

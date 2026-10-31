@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from .errors import ConversionError
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Windows looks for a program in the current folder before PATH; a folder of downloads could
+# then hand us its own "ffmpeg.exe". This turns that off for shutil.which and for every program
+# we start (they inherit it).
+os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 
 
 @dataclass(frozen=True)
@@ -48,15 +52,8 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
         r"%ProgramFiles%\LibreOffice\program\soffice.exe",
         r"%ProgramFiles(x86)%\LibreOffice\program\soffice.exe",
     )),
-    Engine("calibre", "Calibre", "ebook-convert", "calibre.calibre", "~400 MB", (
-        r"%ProgramFiles%\Calibre2\ebook-convert.exe",
-        r"%ProgramFiles(x86)%\Calibre2\ebook-convert.exe",
-    )),
     Engine("imagemagick", "ImageMagick", "magick", "ImageMagick.ImageMagick", "~100 MB", (
         r"%ProgramFiles%\ImageMagick-*\magick.exe",
-    )),
-    Engine("blender", "Blender", "blender", "BlenderFoundation.Blender", "~400 MB", (
-        r"%ProgramFiles%\Blender Foundation\Blender*\blender.exe",
     )),
     Engine("pandoc", "Pandoc", "pandoc", "JohnMacFarlane.Pandoc", "~200 MB", (
         r"%LOCALAPPDATA%\Pandoc\pandoc.exe",
@@ -77,10 +74,15 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
 ]}
 
 _cache: dict[str, str | None] = {}
+_reg_path: list[str] = []  # the registry PATH, read once per refresh()
+_generation = [0]  # goes up with every refresh(): what was found may have changed
 
 
 def _registry_path() -> str:
     """PATH as stored in the registry, which picks up installs made after we started."""
+    cached = _reg_path[:1]  # a copy: refresh() on another thread may empty the list meanwhile
+    if cached:
+        return cached[0]
     if sys.platform != "win32":
         return ""
     import winreg
@@ -93,14 +95,26 @@ def _registry_path() -> str:
                 parts.append(os.path.expandvars(winreg.QueryValueEx(key, "Path")[0]))
         except OSError:
             pass
-    return os.pathsep.join(parts)
+    path = os.pathsep.join(parts)
+    _reg_path[:] = [path]
+    return path
+
+
+def which(exe: str) -> str | None:
+    """exe on PATH (ours, then the registry's), never from the current folder: which() still
+    looks there when the setting above was taken away, and a result from there is relative."""
+    for path in (None, _registry_path()):
+        found = shutil.which(exe, path=path)
+        if found and os.path.isabs(found):
+            return found
+    return None
 
 
 def find(key: str) -> str | None:
     if key in _cache:
         return _cache[key]
     eng = ENGINES[key]
-    found = shutil.which(eng.exe) or shutil.which(eng.exe, path=_registry_path())
+    found = which(eng.exe)
     if not found:
         for pattern in eng.paths:
             hits = sorted(glob.glob(os.path.expandvars(pattern)), reverse=True)
@@ -125,14 +139,18 @@ def require(key: str) -> str:
 
 def refresh() -> None:
     _cache.clear()
+    _reg_path.clear()
+    _generation[0] += 1
+
+
+def state() -> tuple:
+    """Changes whenever which engines are installed may have: after refresh(), or when a test
+    swaps the lookup functions. Anything worked out from engine availability can be kept until then."""
+    return _generation[0], find, available
 
 
 def status() -> list[tuple[Engine, str | None]]:
     return [(e, find(e.key)) for e in ENGINES.values() if not e.hidden]
-
-
-def installable(key: str) -> bool:
-    return bool(ENGINES[key].winget_id) or key in DOWNLOADERS
 
 
 # ---- Ghostscript: Artifex publishes it on GitHub, not winget
@@ -198,9 +216,10 @@ def install(key: str, log: Callable[[str], None] | None = None) -> bool:
         return available(key)
     if not eng.winget_id:
         raise ConversionError(f"{eng.name} can't be installed from ConvertAll")
-    if not shutil.which("winget"):
+    winget = which("winget")
+    if not winget:
         raise ConversionError("winget isn't available; install App Installer from the Microsoft Store")
-    cmd = ["winget", "install", "-e", "--id", eng.winget_id, "--silent",
+    cmd = [winget, "install", "-e", "--id", eng.winget_id, "--silent",
            "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
@@ -214,10 +233,14 @@ def install(key: str, log: Callable[[str], None] | None = None) -> bool:
     return available(key)
 
 
-def run(args: list[str], timeout: float | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
-    """Run an engine command, raising ConversionError with the tail of its output on failure."""
+def run(args: list[str], timeout: float | None = None, cwd: str | None = None,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run an engine command, raising ConversionError with the tail of its output on failure.
+    env adds to (not replaces) our own environment."""
     proc = subprocess.run([str(a) for a in args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", creationflags=NO_WINDOW, timeout=timeout, cwd=cwd, check=False)
+                          errors="replace", creationflags=NO_WINDOW, timeout=timeout, cwd=cwd, check=False,
+                          env={**os.environ, **env} if env else None,
+                          stdin=subprocess.DEVNULL)  # an engine that asks a question gets no answer, not a hang
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise ConversionError("\n".join(msg[-6:]) or f"{args[0]} failed ({proc.returncode})")

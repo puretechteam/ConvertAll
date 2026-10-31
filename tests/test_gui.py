@@ -1,5 +1,6 @@
 """The window, driven offscreen: drop files, check what's preselected, convert."""
 
+import itertools
 import os
 
 import pytest
@@ -26,6 +27,16 @@ def window(app, tmp_path, monkeypatch):
     win = gui.Window()
     yield win
     win.close()
+    wait_for_previews(app)
+
+
+def wait_for_previews(app):
+    """Dropping a 3D model starts loading its preview on a thread: let it finish."""
+    import sys
+    viewer = sys.modules.get("convertall.viewer")
+    for job in list(viewer._RUNNING) if viewer else []:
+        job.wait()
+    app.processEvents()
 
 
 @pytest.fixture
@@ -40,6 +51,23 @@ def run(win):
     win.start_convert()
     assert jobs, "nothing was started"
     return win.outputs
+
+
+def test_a_closed_window_is_freed(app, tmp_path, monkeypatch, samples):
+    """Nothing may keep the window alive once it's closed and dropped (a lambda holding it on a child's
+    signal did): Python then destroyed it at exit, after Qt, and crashed."""
+    import gc
+    settings = QtCore.QSettings(str(tmp_path / "settings.ini"), QtCore.QSettings.IniFormat)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: settings)
+    win = gui.Window()
+    win.set_files([samples("png")])
+    win.picker.set_current("webp")
+    run(win)
+    win.close()
+    app.processEvents()
+    del win
+    gc.collect()
+    assert not [o for o in gc.get_objects() if isinstance(o, gui.Window)]
 
 
 @pytest.mark.parametrize("fmt,expected", [
@@ -164,10 +192,12 @@ def test_no_conversions_disables_the_picker(window, tmp_path):
 # ---- right-click "Extract with ConvertAll"
 
 
-def test_forwarded_message_carries_the_extract_marker(tmp_path):
+def test_forwarded_message_carries_what_to_do(tmp_path):
     a, b = tmp_path / "a.zip", tmp_path / "b.rar"
-    assert gui.parse_message(f"{gui.EXTRACT_MARKER}\n{a}\n{b}\n") == ([a, b], True)
-    assert gui.parse_message(f"{a}\n") == ([a], False)
+    assert gui.parse_message(f"{gui.EXTRACT_MARKER}\n{a}\n{b}\n") == ([a, b], "extract")
+    assert gui.parse_message(f"{gui.VIEW_MARKER}\n{a}\n") == ([a], "view")
+    assert gui.parse_message(f"{a}\n") == ([a], "convert")
+    assert gui.parse_message("") == ([], "convert")
 
 
 def test_a_long_forwarded_file_list_arrives_whole(app, tmp_path):
@@ -186,9 +216,9 @@ def test_a_long_forwarded_file_list_arrives_whole(app, tmp_path):
     gui.listen(server, got.append)
     files = [str(tmp_path / f"file {i:05d} with a longish name é.txt") for i in range(5000)]  # ~400 KB
     (tmp_path / "files.json").write_text(json.dumps(files), encoding="utf-8")
-    script = ("import json, sys; from PySide6.QtWidgets import QApplication; from convertall import gui; "
-              "app = QApplication([]); files = json.load(open(sys.argv[1], encoding='utf-8')); "
-              "sys.exit(0 if gui._forward_to_running(files, True, sys.argv[2]) else 1)")
+    script = ("import json, sys; from convertall import instance; "  # no QApplication: the launcher has none
+              "files = json.load(open(sys.argv[1], encoding='utf-8')); "
+              "sys.exit(0 if instance.forward(files, 'extract', sys.argv[2]) else 1)")
     sender = subprocess.Popen([sys.executable, "-c", script, str(tmp_path / "files.json"), name],
                               env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
     deadline = time.monotonic() + 30
@@ -196,7 +226,7 @@ def test_a_long_forwarded_file_list_arrives_whole(app, tmp_path):
         app.processEvents()
     assert sender.wait(10) == 0
     server.close()
-    assert gui.parse_message(got[0]) == ([tmp_path / os.path.basename(f) for f in files], True)
+    assert gui.parse_message(got[0]) == ([tmp_path / os.path.basename(f) for f in files], "extract")
 
 
 def _run_now(win):
@@ -254,6 +284,7 @@ def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
     monkeypatch.setattr(gui, "_DIR_KEY", rf"{root}\Directory\shell\ConvertAll")
     monkeypatch.setattr(gui, "_SFA", rf"{root}\SystemFileAssociations")
     monkeypatch.setattr(gui, "extract_extensions", lambda: ["zip", "rar"])
+    monkeypatch.setattr(gui, "view_extensions", lambda: ["glb"])
 
     def value(key, name=""):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
@@ -267,7 +298,16 @@ def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
         zip_verb = rf"{root}\SystemFileAssociations\.zip\shell\ConvertAll"
         assert value(zip_verb, "MUIVerb") == "Extract with ConvertAll"
         assert "--extract" in value(zip_verb + r"\command")
+        view_verb = rf"{root}\SystemFileAssociations\.glb\shell\ConvertAllView"
+        assert value(view_verb, "MUIVerb") == "View with ConvertAll"
+        assert value(view_verb, "MultiSelectModel") == "Single"
+        assert "--view" in value(view_verb + r"\command")
         assert not gui.context_menu_outdated()
+        real = gui._launch_command
+        monkeypatch.setattr(gui, "_launch_command", lambda *f: real(*f).replace("convertall", "moved"))
+        assert gui.context_menu_outdated()  # the same version from another folder takes the menu over
+        monkeypatch.setattr(gui, "__version__", "0.9.0")
+        assert not gui.context_menu_outdated()  # ...but an older copy never does
         monkeypatch.setattr(gui, "__version__", "99.0.0")
         assert gui.context_menu_outdated()
         gui.remove_context_menu()
@@ -276,7 +316,304 @@ def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
             winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, zip_verb))
         with pytest.raises(OSError):  # emptied keys we created are gone
             winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.rar"))
+        with pytest.raises(OSError):
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.glb"))
         winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.zip\shell\Other"))
     finally:
         import subprocess
         subprocess.run(["reg", "delete", rf"HKCU\{root}", "/f"], capture_output=True, check=False)
+
+
+# ---- 3D preview and viewer
+
+
+def _preview(window, app, path):
+    window.set_files([path])
+    wait_for_previews(app)
+    return window.drop.preview
+
+
+def test_dropping_a_model_previews_it(window, app, samples):
+    panel = _preview(window, app, samples("glb"))
+    assert panel is not None and not panel.isHidden() and panel.model is not None
+    assert panel.model.triangle_count == 92 and "92 triangles" in window.drop.sub.text()
+    assert not window.drop.expand_btn.isHidden()
+    window.set_files([samples("png")])  # not a model: the preview goes away
+    assert panel.isHidden() and panel.model is None
+    assert window.drop.sub.text().startswith(gui.describe("png") + " · ")  # and its size
+
+
+def test_cad_parts_preview_too(window, app, samples):
+    panel = _preview(window, app, samples("step"))
+    assert panel.model is not None and panel.model.units == ""
+
+
+def test_several_files_get_no_preview(window, app, samples):
+    window.set_files([samples("glb"), samples("stl")])
+    assert window.drop.preview is None or window.drop.preview.isHidden()
+
+
+def test_a_broken_model_says_so_in_the_preview(window, app, tmp_path):
+    bad = tmp_path / "broken.glb"
+    bad.write_bytes(b"glTF\x02\x00\x00\x00 cut short")
+    panel = _preview(window, app, bad)
+    assert panel.model is None and panel.message.text() and window.drop.expand_btn.isHidden()
+
+
+def test_expanding_reuses_the_loaded_model(window, app, samples):
+    from convertall import viewer
+    panel = _preview(window, app, samples("glb"))
+    window.drop.expand_btn.click()
+    big = viewer._OPEN[-1]
+    try:
+        assert big.panel.model is panel.model and big.panel.job is None
+        assert big.stats.text().startswith("2 parts · 92 triangles") and big.wire.isEnabled()
+    finally:
+        big.close()
+
+
+def test_view_with_convertall_opens_models_and_passes_the_rest_on(window, app, samples):
+    from convertall import viewer
+    before = len(viewer._OPEN)
+    window.open_viewers([samples("stl"), samples("png")])
+    try:
+        assert len(viewer._OPEN) == before + 1
+        assert window.files == [samples("png")]  # not a model: opened for converting
+    finally:
+        wait_for_previews(app)
+        viewer._OPEN[-1].close()
+
+
+def test_view_menu_covers_models_and_cad():
+    exts = gui.view_extensions()
+    assert {"glb", "fbx", "stl", "obj", "3mf", "usdz", "blend", "step", "stp", "igs"} <= set(exts)
+    assert not {"dxf", "png", "zip"} & set(exts)
+
+
+def test_menu_offers_discord_and_about_links_to_it(window):
+    menu_btn = next(b for b in window.findChildren(gui.IconButton) if b.icon == "menu")
+    texts = [a.text() for a in menu_btn.menu().actions()]
+    assert "Help and chat on Discord" in texts and gui.DISCORD == "https://discord.gg/dRMRGCG9Fk"
+    box = window.about()
+    try:
+        assert gui.DISCORD in box.text()
+        assert any(lbl.openExternalLinks() for lbl in box.findChildren(gui.QLabel) if gui.DISCORD in lbl.text())
+    finally:
+        box.close()
+
+
+def test_icon_buttons_paint_in_both_themes(window):
+    for palette in (gui.DARK, gui.LIGHT):
+        gui.THEME.update(palette)
+        for b in window.findChildren(gui.IconButton):
+            assert not b.grab().isNull()
+
+
+# ---- what a route can't keep, the checks, settings and presets
+
+def _chip(popup, fmt):
+    return next(c for c in popup.chips if c.property("fmt") == fmt)
+
+
+def test_chip_tooltip_says_route_and_losses(window, samples):
+    popup = _open(window, samples, "png")
+    assert "transparency" in _chip(popup, "jpg").toolTip()
+    assert "parts" not in _chip(popup, "webp").toolTip()
+    popup.close()
+    window.set_files([samples("docx")])
+    window.picker.click()
+    tip = _chip(window.picker.popup, "png").toolTip()
+    assert "(via PDF)" in tip and "150 dpi" in tip
+
+
+def test_status_and_details_after_a_lossy_conversion(window, tmp_path):
+    import json
+
+    import trimesh
+    a, b = trimesh.creation.box(), trimesh.creation.icosphere()
+    b.apply_translation([3, 0, 0])
+    glb = tmp_path / "two.glb"
+    glb.write_bytes(trimesh.Scene({"box": a, "ball": b}).export(file_type="glb"))
+    window.set_files([glb])
+    window.picker.set_current("stl")
+    assert run(window)
+    assert window.status.property("state") == "ok"
+    assert window.status.text() == "Saved two.stl" and "parts are merged" in window.note.text()
+    assert "Parts: 2 → 1" in window.status.toolTip() and "Parts: 2 → 1" in window.note.toolTip()
+    assert not window.details_btn.isHidden()
+    dialog = window.show_details()
+    texts = [w.text() for w in dialog.findChildren(gui.QLabel)]
+    assert any("GLB → STL via trimesh" in t for t in texts) and "As noted" in texts
+    report = json.loads(dialog.copy())
+    assert report[0]["target"] == "stl" and report[0]["warnings"] == []
+    assert json.loads(gui.QGuiApplication.clipboard().text()) == report
+    dialog.close()
+
+
+def test_a_check_that_fails_turns_the_status_amber(window, tmp_path, monkeypatch):
+    from convertall.converters import images
+    monkeypatch.setitem(images.OWN_WRITERS, "psd", lambda img, dst: dst.write_bytes(b"8BPS garbage"))
+    src = tmp_path / "a.png"
+    src.write_bytes((Samples(tmp_path / "s"))("png").read_bytes())
+    window.set_files([src])
+    window.picker.set_current("psd")
+    assert run(window)  # the file is kept
+    assert window.status.property("state") == "warn" and "doesn't open as PSD" in window.note.text()
+
+
+def test_options_show_only_what_the_format_takes(window, samples):
+    window.set_files([samples("png")])
+    panel = window.options_panel
+    window.picker.set_current("jpg")
+    assert not panel.isHidden() and list(panel.widgets) == ["quality", "max_size"]
+    window.picker.set_current("bmp")
+    assert list(panel.widgets) == ["max_size"]
+    window.picker.set_current("zip")
+    assert panel.isHidden()  # nothing to set: no panel at all
+    assert not panel.body.isVisible()  # collapsed until asked
+    assert panel.head.text() == "Options" and panel.summary() == "Default"
+
+
+def test_options_and_presets_reach_the_conversion(window, samples, tmp_path, monkeypatch):
+    monkeypatch.setenv("CONVERTALL_PRESETS", str(tmp_path / "presets.json"))
+    src = samples("png")
+    window.set_files([src])
+    window.picker.set_current("jpg")
+    panel = window.options_panel
+    panel.head.click()
+    assert panel.body.isVisibleTo(window)
+    assert panel.preset_names()[0] == "Default" and panel.pills["Default"].isChecked()
+    panel.pills["Smaller for email and web"].click()
+    assert panel.chosen()["quality"] == 75 and panel.widgets["quality"].value() == 75
+    assert panel.widgets["max_size"].value() == 1920 and panel.widgets["max_size"].currentText() == "1920 px"
+    assert panel.summary() == "Smaller for email and web"
+    assert panel.pills["Smaller for email and web"].isChecked() and panel.save_pill is None
+    jobs = []
+    window.run_job = lambda job: jobs.append(job)
+    window.start_convert()
+    assert jobs[0].settings == {"quality": 75, "max_size": 1920}  # the preset's video and sound settings stay out
+    box = panel.widgets["quality"]
+    box.setValue(60)
+    assert panel.widgets["quality"] is box  # typing in a box never rebuilds it under the cursor
+    assert panel.current_preset() == "" and panel.save_pill is not None  # your own: offered for saving
+    assert not any(p.isChecked() for p in panel.pills.values())
+    monkeypatch.setattr(gui.QInputDialog, "getText", lambda *a, **k: ("Mine", True))
+    panel._save_as()
+    assert gui.options.preset("Mine")["quality"] == 60 and panel.current_preset() == "Mine"
+    assert not panel.delete_btn.isHidden()
+    panel._delete()
+    assert "Mine" not in gui.options.all_presets()
+    panel._reset()
+    assert panel.chosen() == {} and panel.widgets["quality"].value() is None  # "Auto"
+    assert panel.widgets["max_size"].currentText() == "Original"
+    # a quality kept from photos changes nothing for an ebook's PDF: the pills say Default, as the header does
+    panel.widgets["quality"].setValue(60)
+    window.set_files([samples("epub")])
+    window.picker.set_current("pdf")
+    assert set(panel.keys) == {"page_size", "text_size"} and panel.summary() == "Default"
+    assert panel.pills["Default"].isChecked() and panel.save_pill is None
+
+
+def test_number_settings_take_a_listed_or_typed_value(window, samples):
+    window.set_files([samples("png")])
+    window.picker.set_current("jpg")
+    panel = window.options_panel
+    box = panel.widgets["max_size"]
+    assert box.itemText(0) == "Original" and "1920 px" in [box.itemText(i) for i in range(box.count())]
+    box.lineEdit().setText("1500")
+    box.lineEdit().editingFinished.emit()
+    assert panel.chosen() == {"max_size": 1500} and box.currentText() == "1500 px"
+    box.lineEdit().setText("12 parsecs")  # not a number in range: back to what it was
+    box.lineEdit().editingFinished.emit()
+    assert panel.chosen() == {"max_size": 1500} and box.currentText() == "1500 px"
+    box.lineEdit().setText("")
+    box.lineEdit().editingFinished.emit()
+    assert panel.chosen() == {} and box.currentText() == "Original"
+    slider = panel.widgets["quality"]
+    slider.bar.setValue(80)
+    assert panel.chosen() == {"quality": 80} and slider.label.text() == "80"
+    slider.bar.setValue(0)
+    assert panel.chosen() == {} and slider.label.text() == "Auto"
+    assert slider.label.toolTip() == "Auto (92 for JPG)"
+
+
+def test_settings_say_only_what_applies(window, samples):
+    src = samples("mp4")
+    if src is None:
+        pytest.skip("needs FFmpeg to make a sample video")
+    window.set_files([src])
+    window.picker.set_current("webm")
+    panel = window.options_panel
+    fps, quality = panel.widgets["fps"], panel.widgets["video_quality"]
+    assert fps.itemText(0) == "Original"  # not "(12 for GIF)": this is WebM
+    assert [quality.itemText(i) for i in range(quality.count())] == ["Balanced", "Smaller", "Best"]
+    window.picker.set_current("gif")
+    assert panel.widgets["fps"].itemText(0) == "Original (12 for GIF)"
+
+
+def test_the_window_never_gets_smaller_than_what_it_shows(window, samples):
+    window.show()
+    window.set_files([samples("mp4") or samples("png")])
+    window.picker.set_current("gif" if "gif" in window.picker.formats() else "jpg")
+    window.options_panel.head.click()
+    window.resize(window.width(), 200)
+    gui.QApplication.processEvents()
+    lay = window.layout()
+    widgets = [lay.itemAt(i).widget() or lay.itemAt(i).layout() for i in range(lay.count())]
+    shown = [w.geometry() for w in widgets if w is not None and (not hasattr(w, "isVisible") or w.isVisible())]
+    assert all(a.bottom() < b.top() for a, b in itertools.pairwise(shown))  # nothing overlaps
+    assert window.height() >= window.minimumSizeHint().height()
+
+
+def test_options_are_remembered(app, tmp_path, monkeypatch, samples):
+    settings = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: settings)
+    first = gui.Window()
+    first.set_files([samples("png")])
+    first.picker.set_current("jpg")
+    first.options_panel.widgets["quality"].setValue(70)
+    first.close()
+    second = gui.Window()
+    assert second.options_panel.chosen() == {"quality": 70}
+    second.close()
+
+
+@pytest.mark.skipif(not gui.sys.platform.startswith("win"), reason="Windows shortcut")
+def test_start_menu_shortcut(tmp_path, monkeypatch):
+    lnk = tmp_path / "Programs" / "ConvertAll.lnk"
+    monkeypatch.setattr(gui, "start_menu_path", lambda: lnk)
+    assert not gui.start_menu_installed()
+    gui.install_start_menu()
+    assert gui.start_menu_installed() and lnk.read_bytes()[:4] == b"L\0\0\0"  # a real shell link
+    gui.remove_start_menu()
+    assert not gui.start_menu_installed()
+
+
+def test_preset_is_judged_by_what_this_conversion_takes(window, samples, tmp_path, monkeypatch):
+    """Quality 75 and max size 1920 are "Smaller for email and web" for a JPG, even though that
+    preset also sets video and sound settings a picture doesn't take."""
+    monkeypatch.setenv("CONVERTALL_PRESETS", str(tmp_path / "presets.json"))
+    window.set_files([samples("png")])
+    window.picker.set_current("jpg")
+    panel = window.options_panel
+    panel.widgets["quality"].setValue(75)
+    panel.widgets["max_size"].setValue(1920)
+    assert panel.current_preset() == "Smaller for email and web"
+    panel.widgets["quality"].setValue(74)
+    assert panel.current_preset() == ""
+
+
+def test_installing_an_engine_refreshes_the_formats(window, samples, monkeypatch):
+    window.set_files([samples("png")])
+    filled = []
+    monkeypatch.setattr(gui.EnginesDialog, "exec", lambda self: 0)
+    monkeypatch.setattr(window, "fill_picker", lambda: filled.append(True))
+    window.show_engines()
+    assert filled == [True]
+
+
+def test_start_menu_error_without_a_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(gui, "start_menu_path", lambda: tmp_path / "x.lnk")
+    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: gui.subprocess.CompletedProcess(a, 1, "", "  \n"))
+    with pytest.raises(OSError, match="couldn't write the shortcut"):
+        gui.install_start_menu()

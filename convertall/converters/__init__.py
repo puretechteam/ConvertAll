@@ -1,6 +1,6 @@
 # Importing a module registers its converters. Engine-free modules come first so
 # they win ties against engine-backed routes of equal cost.
-from . import (  # noqa: F401  # noqa: F401  # noqa: F401
+from . import (  # noqa: F401
     archives,
     cad,
     comics,

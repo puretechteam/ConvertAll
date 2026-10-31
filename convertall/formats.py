@@ -71,7 +71,9 @@ _CATALOG = {
     "Ebook": {
         "epub": "EPUB", "mobi": "Kindle MOBI", "azw3": "Kindle AZW3", "azw": "Kindle AZW",
         "fb2": "FictionBook", "lit": "MS Reader", "pdb": "Palm eBook", "lrf": "Sony LRF",
-        "chm": "Compiled HTML Help",
+        "chm": "Compiled HTML Help", "fbz": "FictionBook (zip)", "htmlz": "Zipped HTML book",
+        "txtz": "Zipped text book", "pml": "Palm Markup", "pmlz": "Palm Markup (zip)", "rb": "Rocket eBook",
+        "tcr": "Psion TCR", "snb": "Shanda Bambook",
     },
     "Comic": {
         "cbz": "Comic (zip)", "cbr": "Comic (rar)", "cb7": "Comic (7z)", "cbt": "Comic (tar)",
@@ -137,7 +139,7 @@ ALIASES = {
     "svgz": "svg", "epsf": "eps", "epsi": "eps", "dfxp": "ttml", "mhtml": "mht", "asciidoc": "adoc",
     "latex": "tex", "ltx": "tex", "rest": "rst", "mediawiki": "wiki", "djv": "djvu",
     "vcard": "vcf", "ical": "ics", "icalendar": "ics", "ifb": "ics", "otc": "ttc", "sami": "smi",
-    "xml_ttml": "ttml",
+    "xml_ttml": "ttml", "prc": "mobi",
 }
 
 MULTI_EXT = ("tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tar.lz4")
@@ -156,7 +158,9 @@ COMMON_TARGETS = {
     "pdf": "docx", "docx": "pdf", "odt": "docx", "txt": "pdf",
     "xlsx": "pdf", "csv": "xlsx", "tsv": "xlsx", "xls": "xlsx", "ods": "xlsx", "numbers": "xlsx",
     "pptx": "pdf", "odp": "pptx", "key": "pptx",
-    "epub": "pdf", "mobi": "epub", "azw3": "epub", "azw": "epub",
+    "epub": "pdf", "mobi": "epub", "azw3": "epub", "azw": "epub", "fb2": "epub", "fbz": "epub", "lit": "epub",
+    "pdb": "epub", "lrf": "epub", "htmlz": "epub", "txtz": "epub", "pml": "epub", "pmlz": "epub", "rb": "epub",
+    "tcr": "epub", "snb": "epub",
     "json": "csv", "yaml": "json", "toml": "json", "xml": "json", "ini": "json", "plist": "json",
     "jsonl": "json", "sqlite": "xlsx",
     "md": "pdf", "html": "pdf", "mht": "html", "tex": "pdf", "rst": "html", "org": "html",
@@ -187,6 +191,11 @@ def category(fmt: str) -> str:
 
 def label(fmt: str) -> str:
     return FORMATS.get(fmt, ("Other", fmt.upper()))[1] or fmt.upper()
+
+
+def viewable(fmt: str) -> bool:
+    """Whether the 3D viewer can show it: every 3D model and CAD solid (not DXF, a flat drawing)."""
+    return category(fmt) in ("3D model", "CAD") and fmt != "dxf"
 
 
 def suggest(src: str, options) -> str | None:

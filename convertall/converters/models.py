@@ -1,8 +1,7 @@
-"""3D models: mesh formats via trimesh, FBX and 3DS via meshport (both built in); Blend/USD/Alembic via Blender."""
+"""3D models: mesh formats via trimesh; FBX, 3DS, USD, Alembic and .blend via meshport. All built in."""
 
 from pathlib import Path
 
-from .. import engines
 from ..errors import ConversionError
 from ..registry import converter
 
@@ -14,10 +13,45 @@ Z_UP = {"stl", "3mf"}
 _Y_UP_TO_Z_UP = [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]  # (x, y, z) -> (x, -z, y)
 
 
+def _deforms(src: Path, src_fmt: str | None) -> bool:
+    """Whether a glTF file has skins or blend shapes (which trimesh doesn't apply)."""
+    import json
+    import struct
+    try:
+        if (src_fmt or src.suffix.lstrip(".").lower()) == "glb":
+            with open(src, "rb") as f:
+                head = f.read(20)
+                if head[:4] != b"glTF" or len(head) < 20:
+                    return False
+                doc = json.loads(f.read(struct.unpack_from("<I", head, 12)[0]))
+        else:
+            doc = json.loads(src.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, struct.error):
+        return False
+    return bool(doc.get("skins")) or any(p.get("targets") for m in doc.get("meshes", [])
+                                         for p in m.get("primitives", []) if isinstance(p, dict))
+
+
 def _load(src: Path, src_fmt: str | None = None, dst_fmt: str | None = None):
+    import tempfile
+
     import numpy as np
     import trimesh
-    scene = trimesh.load_scene(str(src))
+    if (src_fmt or src.suffix.lstrip(".").lower()) in ("glb", "gltf") and _deforms(src, src_fmt):
+        # bend rigged meshes where their skeleton holds them (their own node plays no part), with
+        # their blend shapes at their weights, before trimesh, which would place them by the node
+        import meshport
+        with tempfile.TemporaryDirectory(prefix="convertall-bent-", ignore_cleanup_errors=True) as tmp:
+            bent = Path(tmp) / "bent.glb"
+            try:
+                meshport.save(meshport.load(src).deformed(), bent)
+            except meshport.MeshportError as e:
+                raise ConversionError(str(e)) from None
+            scene = trimesh.load_scene(str(bent))
+    else:
+        scene = trimesh.load_scene(str(src))
+        if (src_fmt or src.suffix.lstrip(".").lower()) == "obj" and len(scene.geometry) == 1:
+            scene = _obj_parts(src, scene)
     if not scene.geometry:
         raise ConversionError("No 3D geometry found in this file")
     if not any(hasattr(g, "faces") and len(g.faces) for g in scene.geometry.values()):
@@ -26,6 +60,39 @@ def _load(src: Path, src_fmt: str | None = None, dst_fmt: str | None = None):
         turn = np.array(_Y_UP_TO_Z_UP, float)
         scene.apply_transform(turn if dst_fmt in Z_UP else turn.T)
     return scene
+
+
+def _obj_parts(src: Path, scene):
+    """trimesh reads an OBJ's objects ("o" or "g" sections) as one mesh: cut it back into them, by the
+    triangles each section's faces make (in file order, as trimesh keeps them). Left as it is when the
+    counts don't line up (trimesh dropped or joined faces)."""
+    import numpy as np
+    import trimesh
+    sections: list[list] = []  # [name, triangles]
+    tag = None
+    with src.open("rb") as f:
+        for line in f:
+            if line.startswith((b"o ", b"g ")):
+                kind = line[:1]
+                if tag is None or kind == tag:  # the first kind used names the parts; the other is ignored
+                    tag = kind
+                    sections.append([line[2:].strip().decode("utf-8", "replace") or f"part {len(sections) + 1}", 0])
+            elif line.startswith(b"f "):
+                if not sections:
+                    sections.append(["part 1", 0])
+                sections[-1][1] += max(len(line.split()) - 3, 0)
+    sections = [s for s in sections if s[1]]
+    (node,) = scene.graph.nodes_geometry
+    matrix, name = scene.graph[node]
+    mesh = scene.geometry[name]
+    if len(sections) < 2 or sum(n for _, n in sections) != len(getattr(mesh, "faces", ())):
+        return scene
+    parts, start = trimesh.Scene(), 0
+    for label_, n in sections:
+        part = mesh.submesh([np.arange(start, start + n)], append=True)
+        parts.add_geometry(part, node_name=label_, geom_name=label_, transform=matrix)
+        start += n
+    return parts
 
 
 def _side_files_aware(export, dst: Path) -> Path:
@@ -64,7 +131,11 @@ def _geometry_only(scene):
     return trimesh.Trimesh(np.concatenate(verts), np.concatenate(faces), process=False)
 
 
-@converter(inputs=MESH, outputs=MESH - {"obj"})
+GLTF = {"glb", "gltf"}  # glTF to glTF goes through meshport, which keeps all of it (trimesh drops animation)
+
+
+@converter(inputs=MESH - GLTF, outputs=MESH - {"obj"})
+@converter(inputs=GLTF, outputs=MESH - {"obj"} - GLTF)
 @converter(inputs=MESH, outputs={"obj"}, terminal=True)  # may be a folder; chain via GLB instead
 def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import trimesh
@@ -86,14 +157,17 @@ def mesh_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     return dst
 
 
-# ---- FBX and 3DS via meshport (pure Python): to and from glTF, and on to everything else through GLB
+# ---- FBX, 3DS, USD, Alembic and .blend via meshport (pure Python): to and from glTF, and on to
+# everything else through GLB, the cheap hub (routes like usdz -> glb -> 3mf keep separate parts,
+# where going through STL or PLY would merge everything into one mesh)
 
-MESHPORT = {"fbx", "3ds"}
+MESHPORT = {"fbx", "3ds", "usdz", "abc"}  # read and written as one file
+MESHPORT_IN = MESHPORT | {"usd", "blend"}  # .blend is read only; .usd output may be a folder (below)
 
 
-@converter(inputs=MESHPORT, outputs={"glb", "gltf"} | MESHPORT)
-@converter(inputs={"glb", "gltf"}, outputs=MESHPORT)
-def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
+@converter(inputs=MESHPORT_IN, outputs={"glb", "gltf"} | MESHPORT)
+@converter(inputs={"glb", "gltf"}, outputs=MESHPORT | {"glb", "gltf"})
+def meshport_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:
         meshport.save(meshport.load(src, src_fmt), dst, dst_fmt)
@@ -102,63 +176,14 @@ def fbx_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     return dst
 
 
-@converter(inputs=MESHPORT, outputs={"obj"}, terminal=True)  # .obj + .mtl + textures: may be a folder
-def fbx_to_obj(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
+# .obj comes with a .mtl and textures, .usd with a textures folder: these may be folders, so they
+# can only be the last step
+@converter(inputs=MESHPORT_IN, outputs={"obj", "usd"}, terminal=True)
+@converter(inputs={"glb", "gltf"}, outputs={"usd"}, terminal=True)
+def meshport_to_files(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
     import meshport
     try:
         scene = meshport.load(src, src_fmt)
         return _side_files_aware(lambda p: meshport.save(scene, p), dst)
     except meshport.MeshportError as e:
         raise ConversionError(str(e)) from None
-
-
-# ---- Blender, for formats nothing lightweight reads or writes reliably
-
-BLENDER_IN = {"blend", "usd", "usdz", "abc"}
-
-_BLENDER_SCRIPT = r'''
-import bpy, sys
-src, dst, sf, df = sys.argv[sys.argv.index("--") + 1:]
-ops = bpy.ops
-IMPORT = {
-    "glb": ops.import_scene.gltf, "gltf": ops.import_scene.gltf,
-    "obj": ops.wm.obj_import, "stl": ops.wm.stl_import, "ply": ops.wm.ply_import,
-    "usd": ops.wm.usd_import, "usdz": ops.wm.usd_import, "abc": ops.wm.alembic_import,
-}
-EXPORT = {
-    "glb": lambda p: ops.export_scene.gltf(filepath=p, export_format="GLB"),
-    "obj": lambda p: ops.wm.obj_export(filepath=p),
-    "stl": lambda p: ops.wm.stl_export(filepath=p),
-    "ply": lambda p: ops.wm.ply_export(filepath=p),
-    "usd": lambda p: ops.wm.usd_export(filepath=p),
-    "usdz": lambda p: ops.wm.usd_export(filepath=p),
-    "abc": lambda p: ops.wm.alembic_export(filepath=p),
-}
-if sf == "blend":
-    ops.wm.open_mainfile(filepath=src)
-else:
-    ops.wm.read_factory_settings(use_empty=True)
-    IMPORT[sf](filepath=src)
-if not any(o.type in {"MESH", "CURVE", "SURFACE", "META", "FONT"} for o in bpy.data.objects):
-    raise SystemExit("No 3D geometry found in this file")
-EXPORT[df](dst)
-'''
-
-
-# GLB is the cheap hub: multi-hop routes (usdz -> glb -> 3mf) go through it and keep separate
-# parts, instead of through STL/PLY, which merge everything into one mesh. OBJ and USD may come
-# out as folders (textures as side files), so they can only be the last step.
-@converter(inputs=BLENDER_IN, outputs={"glb"}, engine="blender")
-@converter(inputs=BLENDER_IN, outputs={"stl", "ply", "usdz", "abc"}, engine="blender", cost=2)
-@converter(inputs=BLENDER_IN, outputs={"obj", "usd"}, engine="blender", cost=2, terminal=True)
-@converter(inputs={"glb", "gltf", "obj", "stl", "ply"}, outputs={"usdz", "abc"}, engine="blender")
-@converter(inputs={"glb", "gltf", "obj", "stl", "ply"}, outputs={"usd"}, engine="blender", terminal=True)
-def blender_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> Path:
-    exe = engines.require("blender")
-    script = dst.parent / "_convert.py"
-    script.write_text(_BLENDER_SCRIPT, encoding="utf-8")
-
-    def export(path: Path) -> None:
-        engines.run([exe, "-b", "--factory-startup", "-noaudio", "--python-exit-code", "1",
-                     "--python", str(script), "--", str(src), str(path), src_fmt, dst_fmt], timeout=1800)
-    return _side_files_aware(export, dst)

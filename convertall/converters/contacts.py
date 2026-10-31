@@ -5,9 +5,7 @@ leading space, and , ; \\ and newlines escaped. One record per contact or event;
 names ("Mobile", "Start") and the common Google/Outlook export headers are understood on the way back.
 """
 
-import csv
 import datetime as dt
-import json
 import quopri
 import re
 import uuid
@@ -110,14 +108,8 @@ def _records_in(src: Path, fmt: str) -> list[dict]:
 
 
 def _records_out(records: list[dict], dst: Path, fmt: str) -> None:
-    if fmt == "json":
-        dst.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        return
-    fields = list(dict.fromkeys(k for r in records for k in r))
-    with dst.open("w", newline="", encoding="utf-8-sig") as f:  # Excel needs the BOM for accents
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        w.writerows(records)
+    from .data import dump
+    dump(records, dst, fmt)
 
 
 def _norm(header: str) -> str:

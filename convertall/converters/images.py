@@ -12,7 +12,8 @@ from pathlib import Path
 from PIL import Image, ImageOps, ImageSequence
 
 from ..errors import ConversionError
-from ..registry import converter
+from ..losses import MAJOR, loss
+from ..registry import converter, option
 
 PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP", "tiff": "TIFF",
@@ -108,6 +109,10 @@ SAVE_OPTS = {
     "tiff": {"compression": "tiff_lzw"},
     "pdf": {"resolution": 150},
 }
+QUALITY = {"jpg", "webp", "avif", "heic"}  # lossy: these take the quality setting
+# where the photo's details (EXIF: camera, date, place) and color profile go along
+KEEPS_INFO = {"jpg", "png", "webp", "avif", "heic", "tiff"}
+ICONS = {"ico": "16 to 256", "icns": "16 to 1024", "cur": "32 to 128"}  # fixed square sizes, in pixels
 
 
 def prepare(img: Image.Image, fmt: str) -> Image.Image:
@@ -130,13 +135,40 @@ def prepare(img: Image.Image, fmt: str) -> Image.Image:
     return img
 
 
+def fit(img: Image.Image, fmt: str) -> Image.Image:
+    """img scaled down to the max_size setting (its longest side, in pixels), if it's bigger."""
+    size = option("max_size")
+    if not size or fmt in ICONS or max(img.size) <= size:
+        return img
+    scale = size / max(img.size)
+    return img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.Resampling.LANCZOS)
+
+
+def photo_info(src: Image.Image, out: Image.Image, fmt: str) -> dict:
+    """The photo details and color profile src carries, to save with out (turned upright already)."""
+    if fmt not in KEEPS_INFO:
+        return {}
+    info = {}
+    family = lambda mode: "L" if mode in ("L", "LA", "1") else mode if mode in ("CMYK", "LAB") else "RGB"
+    icc = src.info.get("icc_profile")
+    if icc and family(src.mode) == family(out.mode):  # a CMYK profile is wrong for the RGB copy
+        info["icc_profile"] = icc
+    exif = src.getexif()
+    if exif:
+        exif[0x0112] = 1  # orientation: the pixels are upright now
+        info["exif"] = exif.tobytes()
+    return info
+
+
 def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] | None = None,
-               duration=None) -> None:
+               duration=None, info: dict | None = None) -> None:
     if fmt in OWN_WRITERS:
         return OWN_WRITERS[fmt](img, dst)
     if fmt == "heic":
         enable_heif()
-    opts = dict(SAVE_OPTS.get(fmt, {}))
+    opts = dict(SAVE_OPTS.get(fmt, {}), **(info or {}))
+    if fmt in QUALITY and option("quality"):
+        opts["quality"] = int(option("quality"))
     if frames and len(frames) > 1 and fmt in ANIMATED:
         opts.update(save_all=True, append_images=frames[1:])
         if fmt in ("gif", "webp", "png", "avif"):
@@ -151,25 +183,44 @@ def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] 
     img.save(dst, PIL_FORMAT[fmt], **opts)
 
 
-@converter(inputs=READ, outputs=WRITE - {"pdf", "eps"})
+def image_notes(src: str, dst: str, opts: dict) -> list:
+    out = []
+    if dst in ICONS:
+        out.append(loss(f"{dst.upper()} icons come in fixed square sizes ({ICONS[dst]} pixels): the picture is "
+                        "padded to a square and scaled to fit", weight=0, affects=("width", "height")))
+    elif opts.get("max_size"):
+        out.append(loss(f"Pictures bigger than {opts['max_size']} pixels are scaled down to fit", weight=0,
+                        affects=("width", "height")))
+    return out
+
+
+def image_options(src: str, dst: str) -> tuple[str, ...]:
+    return (("quality",) if dst in QUALITY else ()) + (() if dst in ICONS or dst in ("eps", "pdf") else ("max_size",))
+
+
+@converter(inputs=READ, outputs=WRITE - {"pdf", "eps"}, notes=image_notes, options=image_options)
 # an image PDF (or EPS) holds no text or vectors to chain into docx, dxf etc.
-@converter(inputs=READ, outputs={"pdf", "eps"}, terminal=True)
+@converter(inputs=READ, outputs={"pdf", "eps"}, terminal=True, notes=image_notes, options=image_options)
 def pillow_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     if src_fmt == "heic":
         enable_heif()
     with Image.open(src) as img:
-        n = getattr(img, "n_frames", 1)
+        # a Photoshop file's "frames" are its layers: the picture is the flattened whole
+        n = 1 if src_fmt == "psd" else getattr(img, "n_frames", 1)
         if n > 1 and dst_fmt in ANIMATED:
-            frames = [prepare(f.copy(), dst_fmt) for f in ImageSequence.Iterator(img)]
+            frames = [fit(prepare(f.copy(), dst_fmt), dst_fmt) for f in ImageSequence.Iterator(img)]
             save_image(frames[0], dst, dst_fmt, frames, img.info.get("duration"))
         else:
             first = ImageOps.exif_transpose(img) or img
-            save_image(prepare(first, dst_fmt), dst, dst_fmt)
+            out = fit(prepare(first, dst_fmt), dst_fmt)
+            save_image(out, dst, dst_fmt, info=photo_info(img, out, dst_fmt))
 
 
 # ---- pictures -> SVG: trace the shapes into vector paths
 
-@converter(inputs=READ - {"ico", "icns", "cur"}, outputs={"svg"}, cost=2, terminal=True)
+@converter(inputs=READ - {"ico", "icns", "cur"}, outputs={"svg"}, cost=2, terminal=True,
+           notes=lambda s, d, o: [loss("The picture is traced into flat shapes: photos and fine detail "
+                                       "simplify a lot", weight=MAJOR)])
 def trace_to_svg(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import vtracer
     if src_fmt == "heic":

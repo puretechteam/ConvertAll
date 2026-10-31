@@ -164,10 +164,11 @@ def _plain(v):
 
 
 def _records(data) -> list[dict]:
-    """Coerce loaded data into a list of flat records for tabular output."""
+    """Coerce loaded data into a list of flat records for tabular output. Several tables (a
+    workbook's sheets, a database's tables) give the first: one table holds one of them."""
     if isinstance(data, dict):
         lists = [v for v in data.values() if isinstance(v, list)]
-        data = lists[0] if len(data) == 1 and lists else [data]
+        data = lists[0] if lists and len(lists) == len(data) else [data]
     if not isinstance(data, list):
         raise ConversionError("Data must be a list of records to become a table")
     out = []
@@ -208,15 +209,15 @@ def dump(data, path: Path, fmt: str) -> None:
     if fmt == "json":
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
     elif fmt == "jsonl":
-        if isinstance(data, dict):
+        if isinstance(data, dict):  # one record a line: several tables give the first, as for CSV
             lists = [v for v in data.values() if isinstance(v, list)]
-            data = lists[0] if len(data) == 1 and lists else [data]
+            data = lists[0] if lists and len(lists) == len(data) else [data]
         items = data if isinstance(data, list) else [data]
         path.write_text("".join(json.dumps(i, ensure_ascii=False, default=str) + "\n" for i in items),
                         encoding="utf-8")
     elif fmt == "plist":
         with path.open("wb") as f:
-            plistlib.dump(_drop_none(json.loads(json.dumps(data, default=str))), f)
+            plistlib.dump(_drop_none(json.loads(json.dumps(data, default=str))), f, sort_keys=False)
     elif fmt == "yaml":
         import yaml
         path.write_text(yaml.safe_dump(json.loads(json.dumps(data, default=str)), sort_keys=False,
@@ -254,7 +255,8 @@ def dump(data, path: Path, fmt: str) -> None:
     elif fmt in ("csv", "tsv"):
         recs = _records(data)
         fields = list(dict.fromkeys(k for r in recs for k in r))
-        with path.open("w", newline="", encoding="utf-8") as f:
+        # Excel reads a CSV's accents right only with the BOM; TSV stays plain for scripts
+        with path.open("w", newline="", encoding="utf-8-sig" if fmt == "csv" else "utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fields, delimiter="\t" if fmt == "tsv" else ",")
             w.writeheader()
             w.writerows(recs)

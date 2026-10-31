@@ -5,10 +5,15 @@ import functools
 import gzip
 import io
 import lzma
+import os
 import re
 import shutil
+import stat
 import tarfile
+import tempfile
 import zipfile
+import zlib
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -20,7 +25,8 @@ from .. import engines
 from ..detect import COMICS, strip_ext
 from ..errors import ConversionError
 from ..formats import category
-from ..registry import converter
+from ..registry import converter, note
+from ..safety import Budget, Namer, Refused, copy_capped, safe_name, sweep
 
 
 class _BrotliFile(io.RawIOBase):
@@ -292,56 +298,304 @@ def _write_iso(src: Path, dst: Path) -> None:
         iso.close()
 
 
-# ---- extraction
+# ---- extraction. Every extractor gets the same rules (safety.py): names that climb out of the
+# folder and links are left out, other names are made safe for Windows, clashing names are
+# renamed instead of overwritten, and nothing may fill the disk. A sweep afterwards removes any
+# link that slipped through.
 
-def _sevenzip_extract(src: Path, dest: Path) -> None:
-    exe = engines.require("7zip")
-    engines.run([exe, "x", "-y", "-bd", f"-o{dest}", str(src)])
+ENCRYPTED = "{} is password-protected; ConvertAll can't open encrypted archives"
+SEVENZIP_SAFE = (25, 0)  # 7-Zip before 25.00 can write through links (CVE-2025-11001/11002)
 
 
-def extract_to(src: Path, dest: Path, fmt: str) -> None:
+@dataclass
+class _Report:
+    skipped: int = 0
+    renamed: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def lines(self) -> list[str]:
+        out = []
+        if self.skipped:
+            out.append(f"{self.skipped} {'entry' if self.skipped == 1 else 'entries'} skipped "
+                       f"(links, or names that would land outside the folder)")
+        if self.renamed:
+            out.append(f"{self.renamed} renamed so they don't overwrite another file")
+        return out + self.notes
+
+
+def extract_to(src: Path, dest: Path, fmt: str, notes: list[str] | None = None) -> None:
+    """Unpack src into the folder dest. notes, when given, gets a line for anything skipped or
+    renamed and any advice (an old 7-Zip)."""
     import py7zr
     dest.mkdir(parents=True, exist_ok=True)
+    dest = dest.resolve()
     fmt = CONTAINER.get(fmt, fmt)
+    report = _Report()
     if fmt in SEVENZIP_EXTRACT:
-        return _sevenzip_extract(src, dest)
+        _sevenzip_extract(src, dest, report)
+    else:
+        try:
+            _native_extract(src, dest, fmt, report)
+        except Refused:
+            raise
+        except (NotImplementedError, ConversionError, py7zr.exceptions.ArchiveError, zipfile.BadZipFile,
+                tarfile.TarError, zstd.ZstdError, lzma.LZMAError, zlib.error, EOFError, RuntimeError,
+                OSError) as exc:
+            # Unusual methods (Deflate64, PPMd, BCJ2...) or damage -> 7-Zip, if it's there, may
+            # still get the files out
+            if not engines.available("7zip"):
+                why = str(exc) or type(exc).__name__
+                raise ConversionError(f"Couldn't extract {src.name}; it looks damaged ({why})") from exc
+            shutil.rmtree(dest, ignore_errors=True)
+            dest.mkdir(parents=True)
+            report = _Report()
+            _sevenzip_extract(src, dest, report)
+    report.skipped += sweep(dest)
+    if notes is not None:
+        notes.extend(report.lines())
+
+
+def _native_extract(src: Path, dest: Path, fmt: str, report: _Report) -> None:
+    budget = Budget(dest, src.name)
+    if fmt == "zip":
+        _extract_zip(src, dest, budget, report)
+    elif fmt == "7z":
+        _extract_7z(src, dest, budget, report)
+    elif fmt in TAR_STREAM:
+        with STREAM[TAR_STREAM[fmt]](src, "rb") as f, tarfile.open(fileobj=f, mode="r|") as tf:
+            _extract_tar(tf, dest, budget, report)
+    elif fmt.startswith("tar"):
+        with tarfile.open(src) as tf:
+            _extract_tar(tf, dest, budget, report)
+    elif fmt in STREAM:
+        with STREAM[fmt](src, "rb") as fin:  # no reliable size up front: the budget stops a bomb
+            copy_capped(fin, dest / (safe_name(strip_ext(src)) or "extracted"), None, budget, src.name)
+    elif fmt == "cpio":
+        _extract_cpio(src, dest, budget, report)
+    else:
+        raise ConversionError(f"Can't extract {fmt}")
+
+
+def _place(namer: Namer, dest: Path, name: str, is_dir: bool, report: _Report) -> Path | None:
+    """Where an entry goes (its folders made), or None when it must be left out."""
+    rel = safe_name(name)
+    rel = rel and namer.claim(rel, is_dir)
+    if rel is None:
+        report.skipped += 1
+        return None
+    target = dest / rel
+    (target if is_dir else target.parent).mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _extract_zip(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
+    namer = Namer()
+    with zipfile.ZipFile(src) as zf:
+        infos = zf.infolist()
+        if any(i.flag_bits & 1 for i in infos):
+            raise Refused(ENCRYPTED.format(src.name))
+        budget.check(sum(i.file_size for i in infos))
+        for info in infos:
+            if info.create_system == 3 and stat.S_ISLNK(info.external_attr >> 16):  # a Unix link
+                report.skipped += 1
+                continue
+            target = _place(namer, dest, info.filename, info.is_dir(), report)
+            if target and not info.is_dir():
+                with zf.open(info) as fin:  # zipfile itself stops at the size and checks the CRC
+                    copy_capped(fin, target, info.file_size, budget, info.filename)
+    report.renamed += namer.renamed
+
+
+def _extract_tar(tf: tarfile.TarFile, dest: Path, budget: Budget, report: _Report) -> None:
+    """Members one at a time, so it also works on a stream (.tar.zst). tarfile's data filter
+    still runs; this adds the Windows names, the clash renaming and the budget, and leaves out
+    every link and special file (the data filter would keep symbolic links that point inside).
+    A hard link to a file already unpacked becomes a copy of it."""
+    namer = Namer()
+    placed: dict[str, Path] = {}  # safe archive name -> where it went
+    copies: list[tuple[Path, Path]] = []
+
+    def pick(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+        original = placed.get(safe_name(member.linkname) or "") if member.islnk() else None
+        if not (member.isreg() or member.isdir() or original):
+            report.skipped += 1
+            return None
+        target = _place(namer, dest, member.name, member.isdir(), report)
+        if target is None:
+            return None
+        if original:
+            budget.take(original.stat().st_size if original.exists() else 0)
+            copies.append((original, target))
+            return None
+        if member.isreg():
+            budget.take(member.size)
+            placed[safe_name(member.name)] = target
+        rel = target.relative_to(dest).as_posix()
+        return tarfile.data_filter(member.replace(name=rel, deep=False), path)
+
+    tf.extractall(dest, filter=pick)
+    for original, target in copies:
+        shutil.copy2(original, target)
+    report.renamed += namer.renamed
+
+
+def _extract_7z(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
+    import py7zr
+    from py7zr.helpers import get_sanitized_output_path
+    from py7zr.io import Py7zIO, WriterFactory
+
+    class Writer(Py7zIO):
+        def __init__(self, target: Path):
+            self.f = open(target, "xb")  # noqa: SIM115 - closed by close(), or below on errors
+            opened.append(self.f)
+            self.n = 0
+
+        def write(self, s) -> int:
+            budget.take(len(s))  # py7zr itself stops each file at its declared size
+            self.n += len(s)
+            return self.f.write(s)
+
+        def read(self, size=None) -> bytes:
+            return b""
+
+        def seek(self, offset, whence=0) -> int:
+            return self.n
+
+        def seekable(self) -> bool:
+            return False
+
+        def flush(self) -> None:
+            self.f.flush()
+
+        def size(self) -> int:
+            return self.n
+
+        def close(self) -> None:
+            self.f.close()
+
+    namer, where, opened = Namer(), {}, []
+
+    class Factory(WriterFactory):
+        def create(self, filename: str) -> Py7zIO:
+            target = where.pop(filename, None)
+            if target is None:  # a name py7zr renamed itself (the same name twice)
+                target = _place(namer, dest, Path(filename).relative_to(dest).as_posix(), False, report)
+            return Writer(target) if target else py7zr.io.NullIO()
+
     try:
-        if fmt == "zip":
-            with zipfile.ZipFile(src) as zf:
-                zf.extractall(dest)  # zipfile strips ".." and absolute paths
-        elif fmt == "7z":
-            with py7zr.SevenZipFile(src) as z:
-                z.extractall(dest)
-        elif fmt in TAR_STREAM:
-            with STREAM[TAR_STREAM[fmt]](src, "rb") as f, tarfile.open(fileobj=f, mode="r|") as tf:
-                tf.extractall(dest, filter="data")
-        elif fmt.startswith("tar"):
-            with tarfile.open(src) as tf:
-                tf.extractall(dest, filter="data")
-        elif fmt in STREAM:
-            with STREAM[fmt](src, "rb") as fin, (dest / strip_ext(src)).open("wb") as fout:
-                shutil.copyfileobj(fin, fout, 1 << 20)
-        elif fmt == "cpio":
-            _extract_cpio(src, dest)
-        else:
-            raise ConversionError(f"Can't extract {fmt}")
-    except (NotImplementedError, ConversionError, py7zr.exceptions.UnsupportedCompressionMethodError,
-            py7zr.exceptions.Bad7zFile, zipfile.BadZipFile, tarfile.TarError, zstd.ZstdError,
-            lzma.LZMAError, EOFError, RuntimeError) as exc:
-        # Unusual methods (Deflate64, PPMd, BCJ2...) -> let 7-Zip try if it's there
-        if not engines.available("7zip"):
-            raise ConversionError(f"Couldn't extract {src.name}: {exc}") from exc
-        shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True)
-        _sevenzip_extract(src, dest)
+        with py7zr.SevenZipFile(src) as z:
+            if z.needs_password():
+                raise Refused(ENCRYPTED.format(src.name))
+            infos = z.list()
+            budget.check(sum(i.uncompressed or 0 for i in infos if i.is_file))
+            targets = []
+            for i in infos:
+                try:
+                    key = get_sanitized_output_path(i.filename, dest).as_posix()
+                except py7zr.exceptions.Bad7zFile:  # a name py7zr refuses to extract at all
+                    key = None
+                if not (i.is_file or i.is_directory) or i.is_symlink or key is None:
+                    report.skipped += 1
+                    continue
+                target = _place(namer, dest, i.filename, i.is_directory, report)
+                if target and i.is_file:
+                    targets.append(i.filename)
+                    where[key] = target
+            z.extract(dest, targets=targets, factory=Factory())
+    except py7zr.exceptions.PasswordRequired:
+        raise Refused(ENCRYPTED.format(src.name)) from None
+    finally:
+        for f in opened:
+            f.close()
+    for target in where.values():  # empty files have no data, so py7zr never asks for them
+        target.touch()
+    report.renamed += namer.renamed
 
 
-def _extract_cpio(src: Path, dest: Path) -> None:
+def _extract_cpio(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
     import packport
-    try:
-        packport.extract_cpio(src, dest)  # streamed; nothing outside dest, no links
+
+    def skipped(_name: str) -> None:
+        report.skipped += 1
+
+    try:  # streamed; packport applies the same name rules and never writes links
+        packport.extract_cpio(src, dest, max_size=max(budget.left, 0), on_skip=skipped)
     except packport.PackportError as exc:
         raise ConversionError(str(exc)) from None  # old binary/odc CPIO: 7-Zip takes over
+
+
+def _sevenzip_version(exe: str) -> tuple[int, int]:
+    banner = engines.run([exe, "i"]).stdout[:300]
+    m = re.search(r"7-Zip(?: \([a-z]\))? (\d+)\.(\d+)", banner)
+    return (int(m[1]), int(m[2])) if m else (0, 0)
+
+
+def _sevenzip_extract(src: Path, dest: Path, report: _Report) -> None:
+    """7-Zip, after a look at the listing: names that climb out and every link (symbolic or
+    hard) are excluded up front, and the declared sizes must fit on the disk. 7-Zip makes the
+    other names safe for Windows itself, and -aou renames clashes instead of overwriting."""
+    exe = engines.require("7zip")
+    if _sevenzip_version(exe) < SEVENZIP_SAFE:
+        report.notes.append("Your 7-Zip is older than 25.00; updating it is recommended "
+                            "(links were left out either way)")
+    listing = _sevenzip_list(exe, src)
+    exclude, total = [], 0
+    for e in listing:
+        path = e.get("Path", "")
+        link = (any(e.get(k) for k in ("Symbolic Link", "Hard Link", "Link"))
+                or re.search(r"(^|\s)l[r-][w-]", e.get("Attributes", "")))
+        if link or safe_name(path) is None:
+            exclude.append(path.replace("\\", "/"))
+            report.skipped += 1
+        elif e.get("Folder") != "+":
+            total += int(e.get("Size") or 0)
+    Budget(dest, src.name).check(total)
+    fd, listfile = tempfile.mkstemp(suffix=".txt", prefix="convertall-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(exclude))
+        engines.run([exe, "x", "-y", "-aou", "-bd", "-p-", "-scsUTF-8", f"-x@{listfile}",
+                     f"-o{dest}", str(src)])
+    except ConversionError as exc:
+        raise _sevenzip_error(src, exc) from None
+    finally:
+        os.unlink(listfile)
+
+
+def _sevenzip_error(src: Path, exc: ConversionError) -> ConversionError:
+    """7-Zip's complaint, without the paths and headings around it."""
+    if re.search(r"Wrong password|encrypted", str(exc), re.IGNORECASE):
+        return Refused(ENCRYPTED.format(src.name))
+    said = []
+    for line in str(exc).replace(str(src), "").splitlines():
+        line = re.sub(r"^(Open )?ERROR(S)?:?", "", line).strip(" :")
+        if line and line not in said:
+            said.append(line)
+    return ConversionError(f"Couldn't extract {src.name}: {'; '.join(said) or 'not an archive 7-Zip can open'}")
+
+
+def _sevenzip_list(exe: str, src: Path) -> list[dict[str, str]]:
+    """7-Zip's technical listing: one dict per entry ("Path", "Size", "Folder", "Attributes",
+    "Symbolic Link"...)."""
+    try:
+        out = engines.run([exe, "l", "-slt", "-ba", "-p-", "-sccUTF-8", str(src)]).stdout
+    except ConversionError as exc:
+        raise _sevenzip_error(src, exc) from None
+    entries, cur = [], {}
+    for line in out.splitlines():
+        if not line.strip():
+            if cur:
+                entries.append(cur)
+            cur = {}
+        elif " = " in line:
+            key, _, value = line.partition(" = ")
+            if key == "Path" and "Path" in cur:  # -ba listings may not leave a blank line
+                entries.append(cur)
+                cur = {}
+            cur[key.strip()] = value.strip()
+    if cur:
+        entries.append(cur)
+    return entries
 
 
 @converter(inputs={"*"}, outputs=COMPRESS_OUT, terminal=True)
@@ -355,7 +609,10 @@ converter(inputs={"*", "folder"}, outputs=SEVENZIP_OUT, engine="7zip", terminal=
 
 def repack(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     work = dst.parent / "_extracted" / strip_ext(src)
-    extract_to(src, work, src_fmt)
+    found: list[str] = []
+    extract_to(src, work, src_fmt, found)
+    for line in found:  # entries left out or renamed: the new archive doesn't have them either
+        note(line)
     entries = list(work.iterdir())
     root = entries[0] if len(entries) == 1 else work
     compress(root, dst, dst_fmt)

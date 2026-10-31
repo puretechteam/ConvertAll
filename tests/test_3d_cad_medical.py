@@ -6,12 +6,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from convertall import engines
 from convertall.detect import detect
 from convertall.errors import ConversionError
 from convertall.pipeline import convert
-
-from .conftest import needs
 
 
 def _scene_stats(path):
@@ -197,25 +194,60 @@ def test_fbx_without_geometry_is_a_clear_error(tmp_path):
         convert(tmp_path / "anim.fbx", "glb")
 
 
-# ---- Blender (skipped when not installed)
+# ---- USD, Alembic and .blend: built in (meshport), no Blender
 
-@needs("blender")
-def test_blender_roundtrips(glb, tmp_path):
-    for fmt in ("usdz", "abc"):
-        out = convert(glb, fmt)
-        back = convert(out, "glb", out_dir=tmp_path / fmt)
-        assert _scene_stats(back)[1] == 332
+@pytest.mark.parametrize("fmt", ["usdz", "abc"])
+def test_usd_and_alembic_round_trips(glb, tmp_path, fmt):
+    out = convert(glb, fmt)
+    back = convert(out, "glb", out_dir=tmp_path / fmt)
+    assert _scene_stats(back) == (2, 332)  # both parts, every triangle
 
 
-@needs("blender")
-def test_blend_file_and_usd_folder(glb, tmp_path):
-    script = tmp_path / "save.py"
-    blend = tmp_path / "scene.blend"
-    script.write_text("import bpy, sys\nbpy.ops.wm.read_factory_settings(use_empty=True)\n"
-                      f"bpy.ops.import_scene.gltf(filepath=r'{glb}')\n"
-                      f"bpy.ops.wm.save_as_mainfile(filepath=r'{blend}')\n")
-    engines.run([engines.find("blender"), "-b", "--factory-startup", "--python-exit-code", "1",
-                 "--python", str(script)])
-    assert _scene_stats(convert(blend, "3mf"))[0] == 2  # routed via GLB, parts kept
+def test_usd_textures_travel_alongside_or_inside(glb):
+    import zipfile
     usd = convert(glb, "usd")
-    assert usd.is_dir() and (usd / "model.usd").exists()  # textures travel alongside
+    assert usd.is_dir() and (usd / "model.usd").exists() and any((usd / "textures").iterdir())
+    with zipfile.ZipFile(convert(glb, "usdz")) as z:  # a .usdz holds its textures
+        names = z.namelist()
+    assert names[0].endswith(".usdc") and any(n.startswith("textures/") for n in names)
+
+
+def test_blend_files_convert(tmp_path):
+    from pathlib import Path
+    blend = tmp_path / "scene.blend"
+    shutil.copyfile(Path(__file__).parent / "data" / "sample.blend", blend)
+    assert _scene_stats(convert(blend, "3mf"))[0] >= 4  # routed via GLB, parts kept
+    assert convert(blend, "usdz").stat().st_size > 1000
+
+
+def test_no_3d_format_needs_an_engine():
+    from convertall import registry
+    for src in ("blend", "usd", "usdz", "abc", "fbx", "3ds"):
+        for dst, route in registry.targets(src).items():
+            if registry.category(dst) in ("3D model", "CAD"):
+                assert not any(e.engine for e in route.edges), (src, dst)
+
+
+@pytest.mark.parametrize("fmt", ["ply", "stl", "3mf", "obj"])
+def test_rigged_models_convert_bent_where_their_skeleton_holds_them(tmp_path, fmt):
+    """A skinned mesh's own node plays no part in where it shows (glTF ignores it): converting to
+    a format without skeletons must give the mesh where its bone puts it (3 up, here), not where
+    its node is (5 along x), with its blend shape at its weight (a lift of 1)."""
+    import meshport
+    from meshport import Mesh, Morph, Node, Scene, Skin
+    box = trimesh.creation.box((1, 1, 1))
+    mesh = Mesh("box", np.asarray(box.vertices, float), np.full(len(box.faces), 3), np.asarray(box.faces).ravel())
+    mesh.targets, mesh.target_weights = [Morph("Lift", np.tile([0, 1.0, 0], (len(mesh.positions), 1)))], np.array([1.0])
+    bone = Node("bone", np.eye(4))
+    bone.matrix[:3, 3] = (0, 3, 0)
+    body = Node("body", np.eye(4), mesh)
+    body.matrix[:3, 3] = (5, 0, 0)
+    body.skin = Skin([bone], np.eye(4)[None], np.zeros((len(mesh.positions), 1), int), np.ones((len(mesh.positions), 1)))
+    src = tmp_path / "rigged.glb"
+    meshport.save(Scene([bone, body]), src)
+    out = convert(src, fmt, out_dir=tmp_path / fmt)
+    path = next(out.glob("*.obj")) if out.is_dir() else out
+    lo, hi = trimesh.load_scene(str(path)).bounds
+    if fmt in ("stl", "3mf"):  # printing formats are Z up: y comes back as z
+        lo, hi = np.array([lo[0], lo[2], -hi[1]]), np.array([hi[0], hi[2], -lo[1]])
+    assert np.allclose(lo, (-0.5, 3.5, -0.5), atol=1e-4) and np.allclose(hi, (0.5, 4.5, 0.5), atol=1e-4)

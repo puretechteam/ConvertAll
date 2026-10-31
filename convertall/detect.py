@@ -30,11 +30,59 @@ def detect(path: str | Path) -> str:
     if ext in COMICS:
         return _comic_kind(path) or ext
     if ext in FORMATS:
-        return ext
+        return _really(path, ext) or ext
     sniffed = _sniff(path)
     if sniffed:
         return sniffed
     return ext or "bin"
+
+
+# Pictures and PDFs often travel under the wrong extension (a JPEG saved as .png). Where the file
+# doesn't start the way its extension's format always does, but the way another one does, the
+# content wins.
+def _signature(head: bytes) -> str | None:
+    for magic, fmt in ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF87a", "gif"),
+                       (b"GIF89a", "gif"), (b"II*\x00", "tiff"), (b"MM\x00*", "tiff"), (b"%PDF-", "pdf"),
+                       (b"8BPS", "psd"), (b"BM", "bmp")):
+        if head.startswith(magic):
+            return fmt
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"heis"):
+            return "heic"
+        if brand in (b"avif", b"avis"):
+            return "avif"
+    return None
+
+
+CHECKED = {"png", "jpg", "gif", "tiff", "pdf", "psd", "bmp", "webp", "heic", "avif"}
+
+
+def _really(path: Path, ext: str) -> str | None:
+    """The format a file's content shows, when its extension names another checked one."""
+    if ext not in CHECKED:
+        return None
+    try:
+        with path.open("rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    real = _signature(head)
+    return real if real and real != ext else None
+
+
+def mislabelled(path: str | Path) -> str | None:
+    """A line saying what a file really is, when its extension says something else."""
+    path = Path(path)
+    if path.is_dir():
+        return None
+    ext = normalize(path.suffix)
+    real = _really(path, ext) if ext in FORMATS else None
+    if not real:
+        return None
+    return f"This .{path.suffix.lstrip('.').lower()} file is really a {real.upper()}: it was converted as one"
 
 
 def _comic_kind(path: Path) -> str | None:

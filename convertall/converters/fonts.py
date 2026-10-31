@@ -4,6 +4,7 @@ split into their fonts."""
 from pathlib import Path
 
 from ..errors import ConversionError
+from ..losses import loss
 from ..registry import converter
 
 FLAVOR = {"ttf": None, "otf": None, "woff": "woff", "woff2": "woff2"}
@@ -81,8 +82,19 @@ def _to_glyf(font) -> None:
     font.sfntVersion = "\x00\x01\x00\x00"
 
 
+def _outline_notes(src: str, dst: str, opts: dict) -> list:
+    # .ttf is TrueType and .otf usually CFF; a .woff or .woff2 may hold either, so it isn't said up front
+    if dst == "otf" and src == "ttf":
+        return [loss("Outlines become CFF curves (within 1/1000 of the letter size) and TrueType hinting is "
+                     "left out", weight=0)]
+    if dst == "ttf" and src == "otf":
+        return [loss("Outlines become TrueType curves (within 1/1000 of the letter size) and CFF hinting is "
+                     "left out", weight=0)]
+    return []
+
+
 @converter(inputs={"ttf", "otf", "woff", "woff2"}, outputs={"woff", "woff2"})
-@converter(inputs={"ttf", "otf", "woff", "woff2"}, outputs={"ttf", "otf"}, first_only=True)
+@converter(inputs={"ttf", "otf", "woff", "woff2"}, outputs={"ttf", "otf"}, first_only=True, notes=_outline_notes)
 def font_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     from fontTools.ttLib import TTFont
     font = TTFont(src)

@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from ..errors import ConversionError
+from ..losses import loss
 from ..registry import converter
 from ..textfile import read_text
 from .media import VIDEO_IN, ffmpeg
@@ -122,8 +123,14 @@ def _load(src: Path, fmt: str):
         raise ConversionError(f"Couldn't read these subtitles: {exc}") from None
 
 
-@converter(inputs=ALL_SUBS, outputs=STYLED_SUBS | OTHER_SUBS)
-@converter(inputs=STYLED_SUBS | OTHER_SUBS, outputs=TEXT_SUBS)
+def _frame_notes(src: str, dst: str, opts: dict) -> list:
+    if "sub" in (src, dst):
+        return [loss(f"SUB counts frames: times assume {MICRODVD_FPS} frames a second unless the file says", weight=0)]
+    return []
+
+
+@converter(inputs=ALL_SUBS, outputs=STYLED_SUBS | OTHER_SUBS, notes=_frame_notes)
+@converter(inputs=STYLED_SUBS | OTHER_SUBS, outputs=TEXT_SUBS, notes=_frame_notes)
 def pysubs2_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     subs = _load(src, src_fmt)
     if not [e for e in subs if not e.is_comment]:
@@ -135,7 +142,9 @@ def pysubs2_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     subs.save(str(dst), encoding="utf-8", format_=PYSUBS2[dst_fmt], fps=MICRODVD_FPS)
 
 
-@converter(inputs=VIDEO_IN | {"mka"}, outputs=TEXT_SUBS | STYLED_SUBS, engine="ffmpeg")
+@converter(inputs=VIDEO_IN | {"mka"}, outputs=TEXT_SUBS | STYLED_SUBS, engine="ffmpeg",
+           notes=lambda s, d, o: [loss("Only the first subtitle track is taken", "subtitle_tracks",
+                                       affects=("subtitle_tracks",))])
 def video_subs(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     """The video's first subtitle track."""
     ffmpeg(src, dst, ["-map", "0:s:0"])

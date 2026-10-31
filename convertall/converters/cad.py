@@ -2,14 +2,27 @@
 and SVG/PDF vector drawings -> DXF."""
 
 import shutil
+import threading
 from pathlib import Path
 
 from ..errors import ConversionError
-from ..registry import converter
+from ..losses import loss
+from ..registry import converter, option
+
+# gmsh is one global model per process: the window's 3D preview and a conversion of the same
+# part can run at the same time, on two threads, so they take turns.
+_GMSH = threading.Lock()
+# the detail setting: (largest triangle as a share of the part's size, curvature steps per circle)
+DETAIL = {"coarse": (20, 12), "normal": (50, 24), "fine": (150, 48)}
 
 
-@converter(inputs={"step", "iges", "brep"}, outputs={"stl"})
+@converter(inputs={"step", "iges", "brep"}, outputs={"stl"}, options=("detail",))
 def cad_to_stl(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
+    with _GMSH:
+        _mesh_cad(src, dst, src_fmt)
+
+
+def _mesh_cad(src: Path, dst: Path, src_fmt: str) -> None:
     import gmsh
     # gmsh's file reader can trip over non-ASCII paths on Windows, so work on a plain-named copy
     local = dst.parent / f"input.{src_fmt}"
@@ -33,8 +46,9 @@ def cad_to_stl(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
         x0, y0, z0, x1, y1, z1 = gmsh.model.getBoundingBox(-1, -1)
         diag = ((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2) ** 0.5 or 1.0
         # fine enough for 3D printing: follow curvature, cap triangle size relative to the part
-        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 24)
-        gmsh.option.setNumber("Mesh.MeshSizeMax", diag / 50)
+        share, steps = DETAIL.get(option("detail", "normal"), DETAIL["normal"])
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", steps)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", diag / share)
         gmsh.option.setNumber("Mesh.MeshSizeMin", diag / 5000)
         gmsh.option.setNumber("Mesh.Binary", 1)
         gmsh.option.setNumber("Mesh.StlOneSolidPerSurface", 0)
@@ -116,7 +130,9 @@ def _paths(drawing) -> list[tuple[list[tuple[float, float]], bool]]:
     return [(run, closed or (len(run) > 2 and run[0] == run[-1])) for run in runs if len(run) > 1]
 
 
-@converter(inputs={"svg", "pdf"}, outputs={"dxf"}, terminal=True)
+@converter(inputs={"svg", "pdf"}, outputs={"dxf"}, terminal=True,
+           notes=lambda s, d, o: [loss("Shapes become outlines (fills and pictures are left out) and curves "
+                                       "become short straight lines", weight=0)])
 def vectors_to_dxf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     import ezdxf
     from ezdxf import colors

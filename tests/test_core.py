@@ -88,10 +88,10 @@ def test_repack_beats_nesting():
     assert route.edges[0].func.__name__ == "repack"
 
 
-def test_installed_engine_preferred(without_engine):
-    without_engine("calibre")
-    route = registry.find_route("epub", "pdf")
-    assert route.edges[0].engine is None and not route.missing_engines
+def test_ebooks_need_no_engine():
+    for src, dst in (("epub", "pdf"), ("mobi", "epub"), ("lit", "azw3"), ("cbz", "epub"), ("docx", "epub")):
+        route = registry.find_route(src, dst)
+        assert not route.missing_engines and all(e.engine is None for e in route.edges), (src, dst)
 
 
 def test_missing_engine_reported(tmp_path, without_engine):

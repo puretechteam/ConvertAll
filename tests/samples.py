@@ -377,30 +377,15 @@ def _soffice(src: Path, path: Path, filt: str) -> Path | None:
         return None
     out = path.parent / f"_lo_{path.suffix[1:]}"
     out.mkdir(exist_ok=True)
-    engines.run([documents._soffice(), "--headless", "--norestore", "--nolockcheck", "--nodefault",
-                 f"-env:UserInstallation={documents._profile_uri()}", "--convert-to", filt,
-                 "--outdir", str(out), str(src)], timeout=300)
+    profile = documents._profile()
+    with documents._one_at_a_time(profile):
+        engines.run([documents._soffice(), "--headless", "--norestore", "--nolockcheck", "--nodefault",
+                     f"-env:UserInstallation={profile.as_uri()}", "--convert-to", filt,
+                     "--outdir", str(out), str(src)], timeout=300)
     made = next(out.iterdir(), None)
     if made is None:
         return None
     shutil.move(str(made), str(path))
-    return path
-
-
-def _blender(glb: Path, path: Path) -> Path | None:
-    exe = engines.find("blender")
-    if not exe:
-        return None
-    save = {"blend": f"bpy.ops.wm.save_as_mainfile(filepath=r'{path}')",
-            "fbx": f"bpy.ops.export_scene.fbx(filepath=r'{path}')",
-            "usd": f"bpy.ops.wm.usd_export(filepath=r'{path}')",
-            "usdz": f"bpy.ops.wm.usd_export(filepath=r'{path}')",
-            "abc": f"bpy.ops.wm.alembic_export(filepath=r'{path}')"}[path.suffix[1:]]
-    script = path.with_name(f"_make_{path.suffix[1:]}.py")
-    script.write_text("import bpy\nbpy.ops.wm.read_factory_settings(use_empty=True)\n"
-                      f"bpy.ops.import_scene.gltf(filepath=r'{glb}')\n{save}\n", encoding="utf-8")
-    engines.run([exe, "-b", "--factory-startup", "-noaudio", "--python-exit-code", "1", "--python", str(script)],
-                timeout=600)
     return path
 
 
@@ -567,6 +552,11 @@ class Samples:
         if fmt == "fb2":
             p.write_text(FB2, encoding="utf-8")
             return p
+        from convertall.converters import ebooks
+        if fmt in ebooks.BOOKS_OUT:  # the rarer ebook formats, written by bookport from the sample EPUB
+            import bookport
+            bookport.read(self("epub")).write(p, fmt)
+            return p
         if fmt in ("cbz", "cbr", "cb7", "cbt"):
             pages = self.dir / f"_pages_{fmt}"
             (pages / "Issue 1").mkdir(parents=True, exist_ok=True)
@@ -636,12 +626,13 @@ class Samples:
                 out = (scene if fmt in ("glb", "3mf", "obj", "ply", "stl") else scene.to_mesh()).export(file_type=fmt)
                 p.write_bytes(out.encode() if isinstance(out, str) else out)
             return p
-        if fmt == "fbx" and not engines.find("blender"):  # Blender's FBX is the more independent sample
+        if fmt in ("fbx", "usd", "usdz", "abc"):
             import meshport
             meshport.save(meshport.load(self("glb")), p)
             return p
-        if fmt in ("fbx", "blend", "usd", "usdz", "abc"):
-            return _blender(self("glb"), p)
+        if fmt == "blend":  # saved by Blender 5.1: five parts, one with a packed texture
+            shutil.copyfile(Path(__file__).parent / "data" / "sample.blend", p)
+            return p
         if fmt in ("step", "iges", "brep"):
             import gmsh
             gmsh.initialize(interruptible=False)
@@ -716,9 +707,11 @@ def _soffice_writer(html: Path, p: Path, filt: str) -> Path | None:
         return None
     out = p.parent / f"_lo_{p.suffix[1:]}"
     out.mkdir(exist_ok=True)
-    engines.run([documents._soffice(), "--headless", "--norestore", "--nolockcheck", "--nodefault",
-                 f"-env:UserInstallation={documents._profile_uri()}", "--infilter=HTML (StarWriter)",
-                 "--convert-to", filt, "--outdir", str(out), str(html)], timeout=300)
+    profile = documents._profile()
+    with documents._one_at_a_time(profile):
+        engines.run([documents._soffice(), "--headless", "--norestore", "--nolockcheck", "--nodefault",
+                     f"-env:UserInstallation={profile.as_uri()}", "--infilter=HTML (StarWriter)",
+                     "--convert-to", filt, "--outdir", str(out), str(html)], timeout=300)
     made = next(out.iterdir(), None)
     if made is None:
         return None

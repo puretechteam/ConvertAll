@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from convertall import engines, pipeline, registry
+from convertall.assurance import Report
 from convertall.detect import COMICS
 from convertall.errors import ConversionError
 from convertall.formats import FORMATS, category, suggest
@@ -109,7 +110,11 @@ def check(path: Path, fmt: str) -> None:
         elif fmt in ("ass", "ssa"):
             assert "Dialogue:" in text, text[:200]
         assert "Second line" in text
-    elif fmt in ("docx", "xlsx", "pptx", "odt", "ods", "odp", "odg", "epub", "3mf"):
+    elif cat == "Ebook":
+        import bookport
+        book = bookport.read(path)
+        assert book.word_count() > 0 or book.images(), f"{path.name} has no text or pages"
+    elif fmt in ("docx", "xlsx", "pptx", "odt", "ods", "odp", "odg", "3mf"):
         with zipfile.ZipFile(path) as z:
             assert z.testzip() is None
     elif fmt == "rtf":
@@ -180,10 +185,13 @@ def test_convert(pair, samples, tmp_path):
             pipeline.convert(src, dst_fmt, out_dir=tmp_path)
         return
     maybe = content_dependent(src_fmt, dst_fmt)
+    report = Report()
     try:
-        out = pipeline.convert(src, dst_fmt, out_dir=tmp_path)
+        out = pipeline.convert(src, dst_fmt, out_dir=tmp_path, report=report)
     except ConversionError as exc:
         if maybe and maybe in str(exc):
             return
         raise
     check(out, dst_fmt)
+    # the checks ConvertAll makes on every result: on these samples nothing may differ unexplained
+    assert not report.warnings, report.lines()
